@@ -213,6 +213,7 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
       <div id="roBanner"></div>
     </header>
     <div class="content">
+      <div id="searchResults" class="sr" hidden></div>
       <div id="listView"><div class="empty">Cargando tu cartera…</div></div>
       <div id="kanbanView"><div class="board" id="board"></div></div>
     </div>
@@ -256,12 +257,26 @@ body.side-collapsed .app{grid-template-columns:minmax(0,1fr)}
 body.side-collapsed .side{display:none}
 .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(20px);background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:999px;font-size:.84rem;font-weight:500;box-shadow:0 8px 28px rgba(0,0,0,.3);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:80}
 .toast.show{opacity:1;transform:translateX(-50%)}
-.content{flex:1;min-height:0;overflow:auto;padding:18px 22px}
+.content{flex:1;min-height:0;overflow:auto;padding:18px 22px;display:flex;flex-direction:column}
+.sr{flex:none;background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:14px;overflow:hidden}
+.sr[hidden]{display:none}
+.srhead{padding:10px 14px;font-size:.84rem;border-bottom:1px solid var(--border);color:var(--fg-muted)}
+.srhead b{color:var(--fg)}
+.srlist{max-height:230px;overflow-y:auto}
+.srow{display:grid;grid-template-columns:10px minmax(120px,1.3fr) minmax(120px,1.5fr) auto auto;gap:12px;align-items:center;width:100%;text-align:left;border:none;border-bottom:1px solid var(--border);background:transparent;color:var(--fg);padding:9px 14px;cursor:pointer;font-family:var(--font-body);font-size:.86rem}
+.srow:hover{background:color-mix(in srgb,var(--accent) 9%,transparent)}
+.srow .dot{width:9px;height:9px;border-radius:50%}
+.srname{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srmail{color:var(--fg-muted);font-family:var(--font-data);font-size:.78rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srstage{font-size:.75rem;font-weight:600;border:1px solid var(--border);border-radius:999px;padding:2px 10px;white-space:nowrap}
+.srmoney{font-family:var(--font-data);font-weight:600;font-variant-numeric:tabular-nums}
+.srmore,.srempty{padding:10px 14px;color:var(--fg-muted);font-size:.8rem}
 #listView{padding:0 0 24px;flex-direction:row;flex-wrap:wrap;gap:10px;align-content:flex-start}
 #listView .card{flex:1 1 340px;max-width:560px}
 #listView .empty{flex:1 0 100%}
 #listView .loadmore{flex:0 0 100%;max-width:360px;margin:10px auto 0}
-#kanbanView{height:100%;padding:0}
+#listView{flex:0 0 auto}
+#kanbanView{flex:1 1 auto;min-height:0;padding:0}
 .board{height:100%;gap:12px;align-items:stretch;padding-bottom:6px}
 .col{flex:1 0 250px;max-width:380px;max-height:none;height:auto}
 .col-cards{flex:1;min-height:0}
@@ -271,6 +286,8 @@ body.side-collapsed .side{display:none}
   body.menu-open .side{transform:none}
   body.menu-open .scrim{display:block;position:fixed;inset:0;background:var(--overlay);z-index:35}
   .collapse{display:none}
+  .srow{grid-template-columns:10px 1fr auto auto}
+  .srmail{display:none}
   header.top{padding:12px 14px 8px}
   .content{padding:14px}
   .toolbar{flex-wrap:wrap}
@@ -564,15 +581,42 @@ function getFiltered(){
   if(activeStage !== 'all') docs = docs.filter(d=>d.stage===activeStage);
   if(programFilter.length) docs = docs.filter(d=> getProgramas(d).some(p=>programFilter.includes(p)));
   if(clasifFilter.length) docs = docs.filter(d=> clasifFilter.includes(d.clasificacion || SIN_CLASIFICAR));
-  if(searchTerm){
-    const t = searchTerm.toLowerCase();
-    docs = docs.filter(d => (d.nombre||'').toLowerCase().includes(t) || (d.correo||'').toLowerCase().includes(t));
-  }
+  if(searchTerm) docs = docs.filter(matchesSearch);
   docs = docs.slice().sort((a,b)=>{
+    if(searchTerm){ const r = searchRank(a) - searchRank(b); if(r) return r; }   // lo que más se parece, primero
     const av=sumOportunidades(a), bv=sumOportunidades(b);
     return sortDir==='desc' ? bv-av : av-bv;
   });
   return docs;
+}
+
+/* ---------- búsqueda: sin distinguir mayúsculas ni tildes ---------- */
+const fold = s => String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+function matchesSearch(d){
+  const t = fold(searchTerm.trim());
+  return fold(d.nombre).includes(t) || fold(d.correo).includes(t);
+}
+function searchRank(d){
+  const t = fold(searchTerm.trim()), n = fold(d.nombre);
+  if(n.startsWith(t)) return 0;
+  if(n.split(/\s+/).some(w => w.startsWith(t))) return 1;
+  if(n.includes(t)) return 2;
+  return 3;
+}
+// Panel de resultados (vista Kanban): nombre, correo, etapa donde está e importe; clic abre la ficha
+function renderSearchResults(docs){
+  const el = document.getElementById('searchResults');
+  if(!searchTerm.trim()){ el.hidden = true; el.innerHTML = ''; return; }
+  const list = docs.slice().sort((a,b)=> searchRank(a) - searchRank(b) || sumOportunidades(b) - sumOportunidades(a));
+  const shown = list.slice(0, 100);
+  const rows = shown.map(d => {
+    const s = STAGE_BY_ID[d.stage] || STAGES[0];
+    return `<button class="srow" type="button" data-sr="${escapeHtml(d.id)}"><span class="dot" style="background:${s.color}"></span><span class="srname">${escapeHtml(d.nombre||'(sin nombre)')}</span><span class="srmail">${escapeHtml(d.correo||'')}</span><span class="srstage">${s.label}</span><span class="srmoney">${money(sumOportunidades(d))}</span></button>`;
+  }).join('');
+  el.hidden = false;
+  el.innerHTML = `<div class="srhead"><b>${list.length} resultado${list.length===1?'':'s'}</b> para «${escapeHtml(searchTerm.trim())}» · haz clic para abrir la ficha</div>`
+    + (list.length ? `<div class="srlist">${rows}${list.length > shown.length ? `<div class="srmore">Mostrando los primeros ${shown.length}. Escribe más para afinar.</div>` : ''}</div>` : '<div class="srempty">No encontramos clientes con ese nombre o correo.</div>');
+  el.querySelectorAll('[data-sr]').forEach(b => b.addEventListener('click', () => openDetail(b.dataset.sr)));
 }
 
 function renderAll(){
@@ -605,6 +649,7 @@ function cardHtml(d){
 function renderListView(){
   document.getElementById('listView').style.display='flex';
   document.getElementById('kanbanView').style.display='none';
+  document.getElementById('searchResults').hidden = true;
   const listEl = document.getElementById('listView');
   const countEl = document.getElementById('countLabel');
   const filtered = getFiltered();
@@ -674,11 +719,13 @@ function renderKanbanView(){
   let allFiltered = allDocs;
   if(programFilter.length) allFiltered = allFiltered.filter(d=> getProgramas(d).some(p=>programFilter.includes(p)));
   if(clasifFilter.length) allFiltered = allFiltered.filter(d=> clasifFilter.includes(d.clasificacion || SIN_CLASIFICAR));
-  if(searchTerm){
-    const t = searchTerm.toLowerCase();
-    allFiltered = allFiltered.filter(d => (d.nombre||'').toLowerCase().includes(t) || (d.correo||'').toLowerCase().includes(t));
+  if(searchTerm) allFiltered = allFiltered.filter(matchesSearch);
+  renderSearchResults(allFiltered);
+  let stagesToShow = activeStage==='all' ? STAGES : STAGES.filter(s=>s.id===activeStage);
+  if(searchTerm.trim()){   // al buscar, solo las columnas donde hay resultados
+    const withHits = stagesToShow.filter(s => allFiltered.some(d => d.stage === s.id));
+    if(withHits.length) stagesToShow = withHits;
   }
-  const stagesToShow = activeStage==='all' ? STAGES : STAGES.filter(s=>s.id===activeStage);
   board.innerHTML = stagesToShow.map(s=>{
     const docs = allFiltered.filter(d=>d.stage===s.id).slice().sort((a,b)=>{
       const av=sumOportunidades(a), bv=sumOportunidades(b);
