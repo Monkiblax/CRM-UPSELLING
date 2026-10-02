@@ -1178,128 +1178,217 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
 /* ---------- Importar clientes desde CSV (Google Sheets -> Archivo -> Descargar -> CSV) ---------- */
 (function(){
   const $ = id => document.getElementById(id);
-  const norm = s => String(s == null ? '' : s).trim().toLowerCase();
-  const slug = s => norm(s).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+  const unaccent = s => String(s == null ? '' : s).trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const slug = s => unaccent(s).replace(/[^a-z0-9]/g, '');
+  const decodeHtml = s => String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+  const MAX_BYTES = 20 * 1024 * 1024;
 
-  function parseCSV(text){
+  /* ----- lectura del archivo ----- */
+  async function readFile(file){
+    if(file.size > MAX_BYTES) throw new Error('El archivo pesa más de 20 MB. Divídelo en partes.');
+    const buf = await file.arrayBuffer(), u8 = new Uint8Array(buf);
+    if(u8[0] === 0x50 && u8[1] === 0x4B) throw new Error('Este archivo parece de Excel (.xlsx). Descárgalo como CSV: Archivo → Descargar → Valores separados por comas (.csv).');
+    if(u8[0] === 0xFF && u8[1] === 0xFE) return new TextDecoder('utf-16le').decode(buf);
+    if(u8[0] === 0xFE && u8[1] === 0xFF) return new TextDecoder('utf-16be').decode(buf);
+    if(u8.includes(0)) throw new Error('El archivo no parece un CSV de texto.');
+    try{ return new TextDecoder('utf-8', {fatal:true}).decode(buf); }
+    catch(e){ return new TextDecoder('windows-1252').decode(buf); }   // CSV viejo de Excel (acentos en ANSI)
+  }
+
+  /* ----- CSV ----- */
+  function detectDelimiter(text){
+    const counts = {',':0, ';':0, '\t':0}; let q = false;
+    for(let i = 0; i < text.length; i++){
+      const c = text[i];
+      if(c === '"') q = !q;
+      else if(!q){
+        if(c === '\n'){ if(counts[','] + counts[';'] + counts['\t']) break; continue; }
+        if(c in counts) counts[c]++;
+      }
+    }
+    return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || ',';
+  }
+  function parseCSV(text, delim){
+    delim = delim || ',';
     if(text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const rows = []; let row = [], f = '', q = false;
     for(let i = 0; i < text.length; i++){
       const c = text[i];
       if(q){ if(c === '"'){ if(text[i+1] === '"'){ f += '"'; i++; } else q = false; } else f += c; }
       else if(c === '"') q = true;
-      else if(c === ',') { row.push(f); f = ''; }
-      else if(c === '\n') { row.push(f); rows.push(row); row = []; f = ''; }
+      else if(c === delim){ row.push(f); f = ''; }
+      else if(c === '\n'){ row.push(f); rows.push(row); row = []; f = ''; }
       else if(c !== '\r') f += c;
     }
     if(f.length || row.length){ row.push(f); rows.push(row); }
     return rows.filter(r => r.some(c => String(c).trim() !== ''));
   }
 
-  const HEAD = {stage:['stage','etapa'], nombre:['nombre','name'], correo:['correoelectronico','correo','email'], telefono:['numerodetelefono','telefono','phone'], importe:['importe','monto'], fechaCierre:['fechadecierre','fechacierre'], programas:['programa','programas','program']};
+  /* ----- importes: acepta $1,500 · 1500.50 · 1.500,50 · 1500,5 · (100) ----- */
+  function parseMoney(raw){
+    let s = String(raw == null ? '' : raw).trim();
+    if(!s) return {v:0, st:'empty'};
+    let neg = false;
+    if(/^-?\d+(\.\d+)?e[+-]?\d+$/i.test(s)){ const v = Number(s); return isFinite(v) ? {v: Math.round(v * 100) / 100, st:'ambiguous'} : {v:0, st:'bad'}; }
+    if(/^\(.*\)$/.test(s)){ neg = true; s = s.slice(1, -1); }
+    if(s.includes('-')) neg = true;
+    s = s.replace(/[^\d.,]/g, '');
+    if(!/\d/.test(s)) return {v:0, st:'bad'};
+    let st = 'ok';
+    const lastDot = s.lastIndexOf('.'), lastComma = s.lastIndexOf(',');
+    if(lastDot >= 0 && lastComma >= 0){
+      const dec = lastDot > lastComma ? '.' : ',', thou = dec === '.' ? ',' : '.';
+      s = s.split(thou).join('').replace(dec, '.');
+    }else if(lastComma >= 0){
+      if(/^\d{1,3}(,\d{3})+$/.test(s)){ if(/^\d{1,3},\d{3}$/.test(s)) st = 'ambiguous'; s = s.replace(/,/g, ''); }
+      else s = s.replace(/\./g, '').replace(',', '.');
+    }else if(lastDot >= 0){
+      if(/^\d{1,3}(\.\d{3}){2,}$/.test(s)) s = s.replace(/\./g, '');
+      else if(/^\d{1,3}\.\d{3}$/.test(s)){ st = 'ambiguous'; s = s.replace('.', ''); }
+    }
+    let v = Number(s);
+    if(!isFinite(v)) return {v:0, st:'bad'};
+    v = Math.round(v * 100) / 100;
+    if(neg && v) { v = -v; st = 'negative'; }
+    return {v, st};
+  }
+
+  /* ----- columnas (acepta variantes: "Correo Electrónico", "E-mail", "Número de Teléfono"…) ----- */
+  const COLS = [
+    ['programas', s => /programa|program/.test(s)],
+    ['fechaCierre', s => /cierre/.test(s)],
+    ['importe', s => /importe|monto|valor|amount|precio/.test(s)],
+    ['stage', s => /^(stage|etapa)/.test(s)],
+    ['correo', s => /correo|email|mail/.test(s)],
+    ['telefono', s => /telefono|^tel$|phone|^cel|whatsapp|movil/.test(s)],
+    ['nombre', s => /nombre|name|cliente|estudiante|alumno/.test(s)]
+  ];
   const POSITIONAL = {nombre:0, correo:1, telefono:2, programas:3};   // archivo sin encabezado
+  const stageId = v => {
+    const s = slug(v); if(!s) return {id:'lead', known:true};
+    const hit = STAGES.find(x => slug(decodeHtml(x.label)) === s || slug(x.id) === s);
+    return hit ? {id:hit.id, known:true} : {id:'lead', known:false};
+  };
   const progId = v => PROGRAMAS.find(p => slug(p) === slug(v));
   const histAuto = texto => ({ts:new Date().toISOString(), tipo:'auto', texto});
-  function stageId(v){
-    const s = slug(v); if(!s) return {id:'lead', known:true};
-    const hit = STAGES.find(x => slug(x.label) === s || slug(x.id) === s);
-    return hit ? {id:hit.id, known:true} : {id:'lead', known:false};
-  }
-  const keyOf = (n, c, i) => norm(n) + '|' + norm(c) + '|' + (Number(i) || 0);
+  const fixMojibake = s => { s = String(s == null ? '' : s); if(!/[ÃÂ]/.test(s)) return s; try{ return decodeURIComponent(escape(s)); }catch(e){ return s; } };
+  const squash = s => unaccent(fixMojibake(s)).replace(/\s+/g, ' ');
+  const keyOf = (n, c, i) => squash(n) + '|' + squash(c) + '|' + (Math.round((Number(i) || 0) * 100) / 100);
+  const ncKey = (n, c) => squash(n) + '|' + squash(c);
 
-  // Devuelve {total, existing, toAdd:[...], toUpdate:[...], unknownStages, unknownProgs, noHeader, error}
-  // - Con encabezado: columnas por nombre (Stage, Nombre, Correo, Teléfono, Importe, Fecha de Cierre, Programa).
-  // - Sin encabezado: se asume el orden Nombre, Correo, Teléfono, Programa.
-  // - Con columna Importe, cada fila es un cliente (se comparan nombre+correo+importe).
-  //   Sin Importe, un cliente es nombre+correo: si ya existe solo se le suman los programas.
-  function plan(csvText, docs){
-    const rows = parseCSV(csvText);
+  /* ----- plan: qué se agregaría y qué se actualizaría, sin tocar nada ----- */
+  // - Con columna Importe: cada fila es un cliente (clave nombre+correo+importe, por conteo).
+  // - Sin Importe: un cliente es nombre+correo; si ya existe solo se le suman los programas.
+  // - Con o sin Importe, si el archivo trae Programa, se suman a los clientes que ya existan.
+  function plan(text, docs){
+    const delim = detectDelimiter(text);
+    const rows = parseCSV(text, delim);
     if(!rows.length) return {error:'El archivo está vacío.'};
-    const head = rows[0].map(slug), idx = {};
-    for(const [k, names] of Object.entries(HEAD)) idx[k] = head.findIndex(h => names.includes(h));
-    const noHeader = idx.nombre < 0;
+    let idx = {}, noHeader = false;
+    rows[0].map(slug).forEach((h, i) => { for(const [k, fn] of COLS){ if(idx[k] === undefined && fn(h)){ idx[k] = i; break; } } });
+    if(idx.nombre === undefined){
+      if(rows.slice(0, 5).some(r => String(r[1] || '').includes('@'))){ idx = Object.assign({}, POSITIONAL); noHeader = true; }
+      else return {error:'No encontré la columna "Nombre". Encabezados que veo: ' + rows[0].map(c => '"' + String(c).trim() + '"').join(', ') + '. Renombra la columna o usa el orden Nombre, Correo, Teléfono, Programa sin encabezado.'};
+    }
     const body = noHeader ? rows : rows.slice(1);
-    if(noHeader) Object.assign(idx, POSITIONAL);
-    if(!body.length) return {error:'El archivo no tiene filas de datos.'};
-    const hasImporte = idx.importe >= 0;
-    const ncKey = (n, c) => norm(n) + '|' + norm(c);
+    if(!body.length) return {error:'El archivo no tiene filas de datos debajo del encabezado.'};
+    const col = k => idx[k] === undefined ? -1 : idx[k];
+    const hasImporte = col('importe') >= 0, hasProg = col('programas') >= 0;
 
-    const have = {}, byNC = {};
+    const byKey = {}, byNC = {};
     docs.forEach(d => {
-      const k = keyOf(d.nombre, d.correo, d.importe); have[k] = (have[k] || 0) + 1;
+      (byKey[keyOf(d.nombre, d.correo, d.importe)] = byKey[keyOf(d.nombre, d.correo, d.importe)] || []).push(d);
       (byNC[ncKey(d.nombre, d.correo)] = byNC[ncKey(d.nombre, d.correo)] || []).push(d);
     });
     const seen = {}, toAdd = [], newByNC = {}, upd = {};
-    let existing = 0, unknownStages = 0, skipped = 0;
-    const unknownProgs = new Set(), base = Date.now();
+    const w = {noName:0, badMoney:0, ambiguousMoney:0, negativeMoney:0, sciPhones:0, unknownStages:0};
+    const unknownProgs = new Set();
+    let existing = 0, repeatedHeaders = 0; const base = Date.now();
+
+    const addProgsToExisting = (doc, progs) => {
+      if(!progs.length) return;
+      const cur = upd[doc.id] || (upd[doc.id] = {programas: getProgramas(doc).slice(), added: []});
+      progs.forEach(p => { if(!cur.programas.includes(p)){ cur.programas.push(p); cur.added.push(p); } });
+    };
 
     body.forEach(r => {
-      const get = k => idx[k] >= 0 ? String(r[idx[k]] == null ? '' : r[idx[k]]) : '';
-      const nombre = get('nombre');
-      if(!nombre.trim()){ skipped++; return; }
+      const get = k => col(k) >= 0 ? String(r[col(k)] == null ? '' : r[col(k)]) : '';
+      const nombre = get('nombre').trim();
+      if(!nombre){ w.noName++; return; }
+      if(!noHeader && slug(nombre) === 'nombre'){ repeatedHeaders++; return; }   // encabezado repetido a mitad del archivo
+      const telefono = get('telefono').trim(), correo = get('correo').trim();
+      if(/^\d(\.\d+)?e\+?\d+$/i.test(telefono)) w.sciPhones++;
       const progs = [];
-      get('programas').split(/[;|]/).map(s => s.trim()).filter(Boolean).forEach(p => {
+      if(hasProg) get('programas').split(/[;|,\n]/).map(s => s.trim()).filter(Boolean).forEach(p => {
         const hit = progId(p); if(hit){ if(!progs.includes(hit)) progs.push(hit); } else unknownProgs.add(p);
       });
-      const importe = Number(get('importe').replace(/[$,\s]/g, '')) || 0;
-      const nc = ncKey(nombre, get('correo'));
-
-      let target = null;                       // cliente ya existente al que se le suman programas
+      let importe = 0;
       if(hasImporte){
-        const k = keyOf(nombre, get('correo'), importe);
-        seen[k] = (seen[k] || 0) + 1;
-        if(seen[k] <= (have[k] || 0)){ existing++; return; }
-      }else if(byNC[nc]){
-        target = byNC[nc][0];
-      }else if(newByNC[nc]){
-        target = newByNC[nc];                  // misma persona repetida dentro del archivo
+        const m = parseMoney(get('importe')); importe = m.v;
+        if(m.st === 'bad') w.badMoney++; else if(m.st === 'ambiguous') w.ambiguousMoney++; else if(m.st === 'negative') w.negativeMoney++;
       }
 
-      if(target){
-        if(!hasImporte){
-          if(target.__new){ progs.forEach(p => { if(!target.programas.includes(p)) target.programas.push(p); }); return; }
-          const cur = (upd[target.id] || {programas: getProgramas(target).slice(), added: []});
-          progs.forEach(p => { if(!cur.programas.includes(p)){ cur.programas.push(p); cur.added.push(p); } });
-          upd[target.id] = cur;
-          existing++;
-          return;
-        }
+      if(hasImporte){
+        const k = keyOf(nombre, correo, importe);
+        seen[k] = (seen[k] || 0) + 1;
+        const list = byKey[k] || [];
+        if(seen[k] <= list.length){ existing++; addProgsToExisting(list[seen[k] - 1], progs); return; }
+      }else{
+        const nc = ncKey(nombre, correo);
+        if(byNC[nc]){ existing++; addProgsToExisting(byNC[nc][0], progs); return; }
+        if(newByNC[nc]){ progs.forEach(p => { if(!newByNC[nc].programas.includes(p)) newByNC[nc].programas.push(p); }); return; }   // misma persona repetida en el archivo
       }
       const st = stageId(get('stage'));
-      if(!st.known) unknownStages++;
-      const row = {nombre, telefono:get('telefono'), correo:get('correo'), importe, stage:st.id, fechaCierre:get('fechaCierre'), order: base + toAdd.length, programas: progs, __new: true};
+      if(!st.known) w.unknownStages++;
+      const row = {nombre, telefono, correo, importe, stage:st.id, fechaCierre:get('fechaCierre').trim(), order: base + toAdd.length, programas: progs};
       toAdd.push(row);
-      if(!hasImporte) newByNC[nc] = row;
+      if(!hasImporte) newByNC[ncKey(nombre, correo)] = row;
     });
 
     const toUpdate = Object.entries(upd).filter(([, u]) => u.added.length).map(([id, u]) => ({id, programas:u.programas, added:u.added}));
-    return {total: body.length - skipped, existing, toAdd, toUpdate, unknownStages, unknownProgs:[...unknownProgs], noHeader, skipped};
+    return {total: body.length - w.noName - repeatedHeaders, existing, toAdd, toUpdate, noHeader, delimiter: delim, hasImporte, hasProg, warnings: w, unknownProgs: [...unknownProgs],
+            unknownStages: w.unknownStages, skipped: w.noName};
   }
-  window.ImportLogic = {parseCSV, plan};
+  window.ImportLogic = {parseCSV, plan, parseMoney, detectDelimiter, slug, readFile};
 
+  /* ----- pantalla ----- */
   const close = () => { $('importOverlay').hidden = true; };
-  function render(html){ $('importModal').innerHTML = '<button class="close" id="impClose" aria-label="Cerrar">×</button>' + html; $('impClose').addEventListener('click', close); }
+  const render = html => { $('importModal').innerHTML = '<button class="close" id="impClose" aria-label="Cerrar">×</button>' + html; $('impClose').addEventListener('click', close); };
+  const plural = (n, a, b) => n + ' ' + (n === 1 ? a : b);
 
   function stepPick(){
     render(`<h2>Importar clientes</h2>
-      <p class="ophint" style="margin:0 0 12px">En tu Google Sheet: Archivo → Descargar → Valores separados por comas (.csv).<br>Columnas con encabezado: Stage, Nombre, Correo Electronico, Numero de Telefono, Importe, Fecha de Cierre, Programa. Si el archivo no tiene encabezado, se asume este orden: Nombre, Correo, Teléfono, Programa.<br>Solo se agregan clientes nuevos y programas nuevos; no se borra ni se cambia nada de lo que ya tienes.</p>
-      <div class="field"><input id="impFile" type="file" accept=".csv,text/csv"></div>
+      <p class="ophint" style="margin:0 0 12px">En tu Google Sheet: Archivo → Descargar → Valores separados por comas (.csv).<br>Columnas con encabezado: Stage, Nombre, Correo Electronico, Numero de Telefono, Importe, Fecha de Cierre, Programa. Si el archivo no tiene encabezado, se asume este orden: Nombre, Correo, Teléfono, Programa.<br>Solo se agregan clientes nuevos y programas nuevos; no se borra ni se cambia nada de lo que ya tienes. Antes de guardar verás un resumen para confirmar.</p>
+      <div class="field"><input id="impFile" type="file" accept=".csv,.tsv,.txt,text/csv,text/plain"></div>
       <div id="impMsg" class="ophint" style="margin-top:10px"></div>`);
     $('impFile').addEventListener('change', async e => {
       const file = e.target.files[0]; if(!file) return;
-      const res = plan(await file.text(), allDocs);
-      if(res.error){ $('impMsg').textContent = res.error; return; }
-      stepConfirm(res);
+      $('impMsg').textContent = 'Leyendo archivo…';
+      try{
+        const res = plan(await readFile(file), allDocs);
+        if(res.error){ $('impMsg').textContent = res.error; return; }
+        stepConfirm(res);
+      }catch(err){ $('impMsg').textContent = err && err.message ? err.message : 'No se pudo leer el archivo.'; }
     });
   }
+
   function stepConfirm(res){
-    const n = res.toAdd.length, u = res.toUpdate.length, work = n + u;
-    const parts = [n ? 'agregar ' + n + ' cliente' + (n === 1 ? '' : 's') + ' nuevo' + (n === 1 ? '' : 's') : '', u ? 'sumar programas a ' + u + ' cliente' + (u === 1 ? '' : 's') + ' existente' + (u === 1 ? '' : 's') : ''].filter(Boolean);
+    const n = res.toAdd.length, u = res.toUpdate.length, work = n + u, w = res.warnings;
+    const parts = [n ? 'agregar ' + plural(n, 'cliente nuevo', 'clientes nuevos') : '', u ? 'sumar programas a ' + plural(u, 'cliente existente', 'clientes existentes') : ''].filter(Boolean);
+    const notes = [];
+    if(res.noHeader) notes.push('El archivo no tiene encabezado: interpreté las columnas como Nombre, Correo, Teléfono, Programa.');
+    if(w.noName) notes.push(plural(w.noName, 'fila sin nombre se omitió', 'filas sin nombre se omitieron') + '.');
+    if(w.unknownStages) notes.push(plural(w.unknownStages, 'fila con etapa desconocida entra', 'filas con etapa desconocida entran') + ' como "Lead".');
+    if(res.unknownProgs.length) notes.push('Programas que no existen en tu lista y se ignoran: ' + res.unknownProgs.map(escapeHtml).join(', ') + '. Puedes crearlos en Configuración y volver a importar.');
+    if(w.badMoney) notes.push(plural(w.badMoney, 'importe no es un número y quedó en', 'importes no son números y quedaron en') + ' $0.');
+    if(w.ambiguousMoney) notes.push(plural(w.ambiguousMoney, 'importe tiene un separador dudoso', 'importes tienen un separador dudoso') + ' (por ejemplo 1.500 o 1,500; se leyó como mil quinientos). Revísalos.');
+    if(w.negativeMoney) notes.push(plural(w.negativeMoney, 'importe es negativo', 'importes son negativos') + '. Revísalo.');
+    if(w.sciPhones) notes.push(plural(w.sciPhones, 'teléfono viene en notación científica', 'teléfonos vienen en notación científica') + ' (ej. 1.8E+10): Excel dañó el número. Revisa el archivo.');
+    const sample = res.toAdd.slice(0, 5).map(r => `<div class="cfgnote" style="margin:2px 0">• ${escapeHtml(r.nombre)}${r.correo ? ' · ' + escapeHtml(r.correo) : ''}${r.importe ? ' · $' + r.importe : ''}${r.programas.length ? ' · ' + r.programas.map(escapeHtml).join(' + ') : ''}</div>`).join('');
     render(`<h2>Importar clientes</h2>
       <p style="margin:0 0 6px"><b>${res.total}</b> filas en el archivo · <b>${res.existing}</b> ya existen · <b>${n}</b> nuevas${u ? ' · <b>' + u + '</b> con programas por sumar' : ''}</p>
-      ${res.noHeader ? `<p class="ophint" style="margin:0 0 6px">El archivo no tiene encabezado: interpreté las columnas como Nombre, Correo, Teléfono, Programa.</p>` : ''}
-      ${res.unknownStages ? `<p class="ophint" style="margin:0 0 6px">${res.unknownStages} fila(s) con etapa desconocida entrarán como "Lead".</p>` : ''}
-      ${res.unknownProgs.length ? `<p class="ophint" style="margin:0 0 6px">Programas que no existen en tu lista y se ignorarán: ${res.unknownProgs.map(escapeHtml).join(', ')}. Puedes crearlos en Configuración.</p>` : ''}
+      ${n ? `<div style="margin:0 0 8px"><div class="cfgnote" style="margin-bottom:2px">Primeros clientes nuevos:</div>${sample}${n > 5 ? `<div class="cfgnote">… y ${n - 5} más</div>` : ''}</div>` : ''}
+      ${notes.map(t => `<p class="ophint" style="margin:0 0 6px">${t}</p>`).join('')}
       <div id="impMsg" class="ophint"></div>
       <div class="modalactions">
         <button class="ghostbtn" id="impBack" type="button">Cancelar</button>
@@ -1307,13 +1396,14 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
       </div>`);
     $('impBack').addEventListener('click', close);
     $('impGo').addEventListener('click', async () => {
-      $('impGo').disabled = true; $('impMsg').textContent = 'Importando…';
+      $('impGo').disabled = true; $('impBack').disabled = true; $('impMsg').textContent = 'Importando… no cierres esta ventana.';
       try{
         const db = await claude.use('db');
-        const rows = res.toAdd.map(({__new, ...r}) => {
-          if(!r.programas.length) delete r.programas;
-          else r.historial = r.programas.map(p => histAuto('Programa agregado: ' + p));
-          return r;
+        const rows = res.toAdd.map(r => {
+          const o = Object.assign({}, r);
+          if(!o.programas.length) delete o.programas;
+          else o.historial = o.programas.map(p => histAuto('Programa agregado: ' + p));
+          return o;
         });
         if(rows.length) await db.collection('clients').addMany(rows);
         for(const up of res.toUpdate){
@@ -1321,13 +1411,13 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
           await db.collection('clients').doc(up.id).update({programas: up.programas, historial: getHistorial(doc || {}).concat(up.added.map(p => histAuto('Programa agregado: ' + p)))});
         }
         if(u && window.__reloadClients) window.__reloadClients();
-        $('impMsg').textContent = '';
         render(`<h2>Listo</h2><p>${n ? 'Se agregaron <b>' + n + '</b> cliente' + (n === 1 ? '' : 's') + '. ' : ''}${u ? 'Se sumaron programas a <b>' + u + '</b> cliente' + (u === 1 ? '' : 's') + '.' : ''}</p>
           <div class="modalactions"><button class="primarybtn" id="impDone" type="button">Cerrar</button></div>`);
         $('impDone').addEventListener('click', close);
       }catch(err){
-        $('impGo').disabled = false;
-        $('impMsg').textContent = 'No se pudo importar: ' + (err && err.message ? err.message : 'error desconocido');
+        if(window.__reloadClients) window.__reloadClients();
+        $('impBack').disabled = false;
+        $('impMsg').textContent = 'No se pudo terminar: ' + (err && err.message ? err.message : 'error desconocido') + '. Es posible que una parte ya se haya guardado. Cierra esta ventana y vuelve a subir el mismo archivo: no se duplicará nada.';
       }
     });
   }
