@@ -9,8 +9,7 @@ create table if not exists public.clients (
   telefono        text,
   correo          text,
   importe         numeric not null default 0,
-  stage           text not null default 'lead'
-                  check (stage in ('lead','lead_asignados','appointment','cx_followup','followup','pitch','invoice','pagado','suscripcion')),
+  stage           text not null default 'lead',
   fecha_cierre    text,
   notas           text,
   ord             bigint,
@@ -22,6 +21,7 @@ create table if not exists public.clients (
   programas       jsonb,
   oportunidades   jsonb,
   historial       jsonb,
+  custom          jsonb,  -- valores de los campos personalizados {id_campo: valor}
   created_at      timestamptz not null default now()
 );
 create index if not exists clients_stage_idx on public.clients (stage);
@@ -68,6 +68,25 @@ create policy clients_update on public.clients for update to authenticated
   using (public.app_role() = 'editor') with check (public.app_role() = 'editor');
 create policy clients_delete on public.clients for delete to authenticated
   using (public.app_role() = 'editor');
+
+-- ---------- Configuración (etapas, listas, textos, campos personalizados) ----------
+create table if not exists public.app_settings (
+  id         int primary key default 1 check (id = 1),
+  data       jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+alter table public.app_settings enable row level security;
+
+drop policy if exists app_settings_select on public.app_settings;
+drop policy if exists app_settings_insert on public.app_settings;
+drop policy if exists app_settings_update on public.app_settings;
+
+create policy app_settings_select on public.app_settings for select to authenticated
+  using (public.app_role() is not null);
+create policy app_settings_insert on public.app_settings for insert to authenticated
+  with check (public.app_role() = 'editor');
+create policy app_settings_update on public.app_settings for update to authenticated
+  using (public.app_role() = 'editor') with check (public.app_role() = 'editor');
 
 -- Cambios en vivo entre usuarios
 do $$ begin

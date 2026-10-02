@@ -169,10 +169,11 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
   <header class="top">
     <div class="titlerow">
       <div>
-        <h1>Pipeline de Upsell</h1>
+        <h1 id="appName">Pipeline de Upsell</h1>
         <p class="sub"><span id="subText">Cartera de Miguel Vélez · Abacus Exchange</span> · <a href="#" id="logoutLink" style="color:var(--fg-muted)">Salir</a></p>
       </div>
       <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+        <button class="sortbtn" id="settingsBtn" style="display:none">Configuración</button>
         <button class="sortbtn" id="importBtn" style="display:none">Importar CSV</button>
         <button class="newbtn" id="newClientBtn">+ Nuevo cliente</button>
       </div>
@@ -209,6 +210,9 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
 </div>
 <div class="overlay" id="newOverlay" hidden>
   <div class="modal small" id="newModal"></div>
+</div>
+<div class="overlay" id="settingsOverlay" hidden>
+  <div class="modal" id="settingsModal" style="max-width:780px"></div>
 </div>
 <div class="overlay" id="importOverlay" hidden>
   <div class="modal small" id="importModal"></div>
@@ -357,9 +361,14 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
     };
   }
   const db = { collection: makeCollection };
+  window.__sb = sb;
+  window.__reloadClients = () => reloaders.forEach(f => f());
+  let bootHook = null;
   window.claude = {
     use: async (name) => {
       await ready;
+      if(!bootHook) bootHook = (async () => { try{ if(window.__beforeBoot) await window.__beforeBoot(); }catch(e){} })();
+      await bootHook;
       if(name === 'db') return db;
       if(name === 'user') return { can: () => role === 'editor' };
       return null;
@@ -382,7 +391,7 @@ const STAGES = [
 ];
 const STAGE_BY_ID = Object.fromEntries(STAGES.map(s=>[s.id,s]));
 const ESTADOS_OP = ['En proceso','Pendiente','Pagado','Cancelado'];
-const CALENDLY_URL = (window.APP_CONFIG && window.APP_CONFIG.CALENDLY_URL) || 'https://calendly.com/miguel-abacus/sesion-de-dudas-e-inquietudes';
+let CALENDLY_URL = (window.APP_CONFIG && window.APP_CONFIG.CALENDLY_URL) || 'https://calendly.com/miguel-abacus/sesion-de-dudas-e-inquietudes';
 const PROGRAMAS = ['Abacus Experience','PRO','Bundle','Bundle premium','Portfolio Hacking','Options Pocket','PMC','CPA New York','CPA Miami','Traders Club','Dynamic','Inner Circle','1 a 1'];
 const CLASIFICACIONES = ['Cursando / Invierte','Cursando / No Invierte','Finalizado / Invierte','Finalizado / No Invierte','Finalizado / Inactivo','No Completó','Pausado','Abandonó'];
 const SIN_CLASIFICAR = 'Sin clasificar';
@@ -665,6 +674,7 @@ function renderDetailModal(){
       <div class="field"><label>Etapa</label>
         <select id="fStage" ${dis?'disabled':''}>${stageOptionsHtml(d.stage)}</select>
       </div>
+      ${window.customFieldsHtml ? window.customFieldsHtml(d, dis) : ''}
     </div>
 
     <div class="sectionhead"><h3>Pago / Suscripción</h3></div>
@@ -736,6 +746,7 @@ function renderDetailModal(){
   document.getElementById('fMontoPagado').addEventListener('blur', e=> saveField('montoPagado', Number(e.target.value)||0));
   document.getElementById('fTipoPago').addEventListener('change', e=> saveField('tipoPago', e.target.value));
   document.getElementById('fFechaPago').addEventListener('change', e=> saveField('fechaPago', e.target.value));
+  if(window.bindCustomFields) window.bindCustomFields(saveField);
 
   document.querySelectorAll('#progGrid input[type=checkbox]').forEach(cb=>{
     cb.addEventListener('change', async ()=>{
@@ -1036,7 +1047,10 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
     return rows.filter(r => r.some(c => String(c).trim() !== ''));
   }
 
-  const HEAD = {stage:['stage','etapa'], nombre:['nombre','name'], correo:['correoelectronico','correo','email'], telefono:['numerodetelefono','telefono','phone'], importe:['importe','monto'], fechaCierre:['fechadecierre','fechacierre']};
+  const HEAD = {stage:['stage','etapa'], nombre:['nombre','name'], correo:['correoelectronico','correo','email'], telefono:['numerodetelefono','telefono','phone'], importe:['importe','monto'], fechaCierre:['fechadecierre','fechacierre'], programas:['programa','programas','program']};
+  const POSITIONAL = {nombre:0, correo:1, telefono:2, programas:3};   // archivo sin encabezado
+  const progId = v => PROGRAMAS.find(p => slug(p) === slug(v));
+  const histAuto = texto => ({ts:new Date().toISOString(), tipo:'auto', texto});
   function stageId(v){
     const s = slug(v); if(!s) return {id:'lead', known:true};
     const hit = STAGES.find(x => slug(x.label) === s || slug(x.id) === s);
@@ -1044,30 +1058,73 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
   }
   const keyOf = (n, c, i) => norm(n) + '|' + norm(c) + '|' + (Number(i) || 0);
 
-  // Devuelve {total, existing, toAdd:[...], unknownStages, error}
+  // Devuelve {total, existing, toAdd:[...], toUpdate:[...], unknownStages, unknownProgs, noHeader, error}
+  // - Con encabezado: columnas por nombre (Stage, Nombre, Correo, Teléfono, Importe, Fecha de Cierre, Programa).
+  // - Sin encabezado: se asume el orden Nombre, Correo, Teléfono, Programa.
+  // - Con columna Importe, cada fila es un cliente (se comparan nombre+correo+importe).
+  //   Sin Importe, un cliente es nombre+correo: si ya existe solo se le suman los programas.
   function plan(csvText, docs){
     const rows = parseCSV(csvText);
-    if(rows.length < 2) return {error:'El archivo está vacío o no tiene filas de datos.'};
+    if(!rows.length) return {error:'El archivo está vacío.'};
     const head = rows[0].map(slug), idx = {};
     for(const [k, names] of Object.entries(HEAD)) idx[k] = head.findIndex(h => names.includes(h));
-    if(idx.nombre < 0) return {error:'No encontré la columna "Nombre" en el encabezado.'};
-    const have = {};
-    docs.forEach(d => { const k = keyOf(d.nombre, d.correo, d.importe); have[k] = (have[k] || 0) + 1; });
-    const seen = {}, toAdd = []; let existing = 0, unknownStages = 0, skipped = 0;
-    const base = Date.now();
-    rows.slice(1).forEach(r => {
+    const noHeader = idx.nombre < 0;
+    const body = noHeader ? rows : rows.slice(1);
+    if(noHeader) Object.assign(idx, POSITIONAL);
+    if(!body.length) return {error:'El archivo no tiene filas de datos.'};
+    const hasImporte = idx.importe >= 0;
+    const ncKey = (n, c) => norm(n) + '|' + norm(c);
+
+    const have = {}, byNC = {};
+    docs.forEach(d => {
+      const k = keyOf(d.nombre, d.correo, d.importe); have[k] = (have[k] || 0) + 1;
+      (byNC[ncKey(d.nombre, d.correo)] = byNC[ncKey(d.nombre, d.correo)] || []).push(d);
+    });
+    const seen = {}, toAdd = [], newByNC = {}, upd = {};
+    let existing = 0, unknownStages = 0, skipped = 0;
+    const unknownProgs = new Set(), base = Date.now();
+
+    body.forEach(r => {
       const get = k => idx[k] >= 0 ? String(r[idx[k]] == null ? '' : r[idx[k]]) : '';
       const nombre = get('nombre');
       if(!nombre.trim()){ skipped++; return; }
+      const progs = [];
+      get('programas').split(/[;|]/).map(s => s.trim()).filter(Boolean).forEach(p => {
+        const hit = progId(p); if(hit){ if(!progs.includes(hit)) progs.push(hit); } else unknownProgs.add(p);
+      });
       const importe = Number(get('importe').replace(/[$,\s]/g, '')) || 0;
-      const k = keyOf(nombre, get('correo'), importe);
-      seen[k] = (seen[k] || 0) + 1;
-      if(seen[k] <= (have[k] || 0)){ existing++; return; }
+      const nc = ncKey(nombre, get('correo'));
+
+      let target = null;                       // cliente ya existente al que se le suman programas
+      if(hasImporte){
+        const k = keyOf(nombre, get('correo'), importe);
+        seen[k] = (seen[k] || 0) + 1;
+        if(seen[k] <= (have[k] || 0)){ existing++; return; }
+      }else if(byNC[nc]){
+        target = byNC[nc][0];
+      }else if(newByNC[nc]){
+        target = newByNC[nc];                  // misma persona repetida dentro del archivo
+      }
+
+      if(target){
+        if(!hasImporte){
+          if(target.__new){ progs.forEach(p => { if(!target.programas.includes(p)) target.programas.push(p); }); return; }
+          const cur = (upd[target.id] || {programas: getProgramas(target).slice(), added: []});
+          progs.forEach(p => { if(!cur.programas.includes(p)){ cur.programas.push(p); cur.added.push(p); } });
+          upd[target.id] = cur;
+          existing++;
+          return;
+        }
+      }
       const st = stageId(get('stage'));
       if(!st.known) unknownStages++;
-      toAdd.push({nombre, telefono:get('telefono'), correo:get('correo'), importe, stage:st.id, fechaCierre:get('fechaCierre'), order: base + toAdd.length});
+      const row = {nombre, telefono:get('telefono'), correo:get('correo'), importe, stage:st.id, fechaCierre:get('fechaCierre'), order: base + toAdd.length, programas: progs, __new: true};
+      toAdd.push(row);
+      if(!hasImporte) newByNC[nc] = row;
     });
-    return {total: rows.length - 1 - skipped, existing, toAdd, unknownStages, skipped};
+
+    const toUpdate = Object.entries(upd).filter(([, u]) => u.added.length).map(([id, u]) => ({id, programas:u.programas, added:u.added}));
+    return {total: body.length - skipped, existing, toAdd, toUpdate, unknownStages, unknownProgs:[...unknownProgs], noHeader, skipped};
   }
   window.ImportLogic = {parseCSV, plan};
 
@@ -1076,7 +1133,7 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
 
   function stepPick(){
     render(`<h2>Importar clientes</h2>
-      <p class="ophint" style="margin:0 0 12px">En tu Google Sheet: Archivo → Descargar → Valores separados por comas (.csv). Columnas: Stage, Nombre, Correo Electronico, Numero de Telefono, Importe, Fecha de Cierre.<br>Solo se agregan los clientes que aún no existen; no se borra ni se cambia nada de lo que ya tienes.</p>
+      <p class="ophint" style="margin:0 0 12px">En tu Google Sheet: Archivo → Descargar → Valores separados por comas (.csv).<br>Columnas con encabezado: Stage, Nombre, Correo Electronico, Numero de Telefono, Importe, Fecha de Cierre, Programa. Si el archivo no tiene encabezado, se asume este orden: Nombre, Correo, Teléfono, Programa.<br>Solo se agregan clientes nuevos y programas nuevos; no se borra ni se cambia nada de lo que ya tienes.</p>
       <div class="field"><input id="impFile" type="file" accept=".csv,text/csv"></div>
       <div id="impMsg" class="ophint" style="margin-top:10px"></div>`);
     $('impFile').addEventListener('change', async e => {
@@ -1087,23 +1144,36 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
     });
   }
   function stepConfirm(res){
-    const n = res.toAdd.length;
+    const n = res.toAdd.length, u = res.toUpdate.length, work = n + u;
+    const parts = [n ? 'agregar ' + n + ' cliente' + (n === 1 ? '' : 's') + ' nuevo' + (n === 1 ? '' : 's') : '', u ? 'sumar programas a ' + u + ' cliente' + (u === 1 ? '' : 's') + ' existente' + (u === 1 ? '' : 's') : ''].filter(Boolean);
     render(`<h2>Importar clientes</h2>
-      <p style="margin:0 0 6px"><b>${res.total}</b> filas en el archivo · <b>${res.existing}</b> ya existen · <b>${n}</b> nuevas</p>
+      <p style="margin:0 0 6px"><b>${res.total}</b> filas en el archivo · <b>${res.existing}</b> ya existen · <b>${n}</b> nuevas${u ? ' · <b>' + u + '</b> con programas por sumar' : ''}</p>
+      ${res.noHeader ? `<p class="ophint" style="margin:0 0 6px">El archivo no tiene encabezado: interpreté las columnas como Nombre, Correo, Teléfono, Programa.</p>` : ''}
       ${res.unknownStages ? `<p class="ophint" style="margin:0 0 6px">${res.unknownStages} fila(s) con etapa desconocida entrarán como "Lead".</p>` : ''}
+      ${res.unknownProgs.length ? `<p class="ophint" style="margin:0 0 6px">Programas que no existen en tu lista y se ignorarán: ${res.unknownProgs.map(escapeHtml).join(', ')}. Puedes crearlos en Configuración.</p>` : ''}
       <div id="impMsg" class="ophint"></div>
       <div class="modalactions">
         <button class="ghostbtn" id="impBack" type="button">Cancelar</button>
-        <button class="primarybtn" id="impGo" type="button" ${n ? '' : 'disabled'}>${n ? 'Agregar ' + n + ' cliente' + (n === 1 ? '' : 's') : 'Nada nuevo que agregar'}</button>
+        <button class="primarybtn" id="impGo" type="button" ${work ? '' : 'disabled'}>${work ? 'Confirmar: ' + parts.join(' y ') : 'Nada nuevo que agregar'}</button>
       </div>`);
     $('impBack').addEventListener('click', close);
     $('impGo').addEventListener('click', async () => {
       $('impGo').disabled = true; $('impMsg').textContent = 'Importando…';
       try{
         const db = await claude.use('db');
-        await db.collection('clients').addMany(res.toAdd);
+        const rows = res.toAdd.map(({__new, ...r}) => {
+          if(!r.programas.length) delete r.programas;
+          else r.historial = r.programas.map(p => histAuto('Programa agregado: ' + p));
+          return r;
+        });
+        if(rows.length) await db.collection('clients').addMany(rows);
+        for(const up of res.toUpdate){
+          const doc = allDocs.find(d => d.id === up.id);
+          await db.collection('clients').doc(up.id).update({programas: up.programas, historial: getHistorial(doc || {}).concat(up.added.map(p => histAuto('Programa agregado: ' + p)))});
+        }
+        if(u && window.__reloadClients) window.__reloadClients();
         $('impMsg').textContent = '';
-        render(`<h2>Listo</h2><p>Se agregaron <b>${n}</b> cliente${n === 1 ? '' : 's'}.</p>
+        render(`<h2>Listo</h2><p>${n ? 'Se agregaron <b>' + n + '</b> cliente' + (n === 1 ? '' : 's') + '. ' : ''}${u ? 'Se sumaron programas a <b>' + u + '</b> cliente' + (u === 1 ? '' : 's') + '.' : ''}</p>
           <div class="modalactions"><button class="primarybtn" id="impDone" type="button">Cerrar</button></div>`);
         $('impDone').addEventListener('click', close);
       }catch(err){
@@ -1117,6 +1187,273 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
 
   // Solo los editores ven el botón
   if(window.claude) claude.use('user').then(u => { if(u && u.can('data.write')) $('importBtn').style.display = ''; });
+})();
+</script>
+
+<style>
+.cfgsec{margin:22px 0 8px;display:flex;justify-content:space-between;align-items:center}
+.cfgsec h3{margin:0;font-size:.95rem}
+.cfgrow{display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+.cfgrow input[type=text],.cfgrow select{flex:1;min-width:110px;border:1px solid var(--border);background:var(--bg);color:var(--fg);border-radius:8px;padding:7px 9px;font-family:var(--font-body);font-size:.85rem}
+.cfgrow input[type=color]{width:34px;height:32px;padding:2px;border:1px solid var(--border);border-radius:8px;background:var(--bg);cursor:pointer;flex:none}
+.cfgrow .ib{border:1px solid var(--border);background:transparent;color:var(--fg-muted);border-radius:7px;width:30px;height:30px;cursor:pointer;flex:none;font-size:.85rem}
+.cfgrow .ib:hover{color:var(--fg);border-color:var(--accent)}
+.cfgrow.gone{opacity:.7;border:1px dashed var(--danger);border-radius:8px;padding:6px 8px}
+.cfgnote{color:var(--fg-muted);font-size:.78rem}
+.cfgerr{color:var(--danger);font-size:.82rem;margin-top:10px;min-height:1em}
+</style>
+<script>
+/* ---------- Configuración: etapas, listas, textos y campos personalizados ---------- */
+(function(){
+  const $ = id => document.getElementById(id);
+  const esc = s => escapeHtml(s);
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  const rid = p => p + Math.random().toString(36).slice(2, 8);
+  const ORIG = {
+    appName: 'Pipeline de Upsell',
+    subtitle: (window.APP_CONFIG && window.APP_CONFIG.SUBTITLE) || 'Cartera de Miguel Vélez · Abacus Exchange',
+    calendlyUrl: CALENDLY_URL,
+    stages: STAGES.map(s => ({id:s.id, label:s.label, hint:s.hint, color:s.color})),
+    programas: PROGRAMAS.slice(),
+    clasificaciones: CLASIFICACIONES.slice(),
+    customFields: []
+  };
+  let CURRENT = JSON.parse(JSON.stringify(ORIG));
+  let draft = null;
+  const safeColor = c => (/^#[0-9a-f]{6}$/i.test(c) || /^var\(--stage-[a-z-]+\)$/.test(c)) ? c : '#64748B';
+  const cleanUrl = u => String(u || '').replace(/["'<>\s]/g, '');
+  const arr = (v, d) => Array.isArray(v) && v.length ? v : d;
+
+  function applySettings(cfg){
+    const stages = arr(cfg.stages, ORIG.stages).map(s => ({id:s.id, label:esc(s.label || ''), hint:esc(s.hint || ''), color:safeColor(s.color)}));
+    STAGES.splice(0, STAGES.length, ...stages);
+    Object.keys(STAGE_BY_ID).forEach(k => delete STAGE_BY_ID[k]);
+    stages.forEach(s => { STAGE_BY_ID[s.id] = s; });
+    PROGRAMAS.splice(0, PROGRAMAS.length, ...(Array.isArray(cfg.programas) ? cfg.programas : ORIG.programas));
+    CLASIFICACIONES.splice(0, CLASIFICACIONES.length, ...(Array.isArray(cfg.clasificaciones) ? cfg.clasificaciones : ORIG.clasificaciones));
+    CLASIF_FILTER_OPTIONS.splice(0, CLASIF_FILTER_OPTIONS.length, ...CLASIFICACIONES, SIN_CLASIFICAR);
+    const url = cleanUrl(cfg.calendlyUrl);
+    if(/^https?:\/\//i.test(url)) CALENDLY_URL = url;
+    $('appName').textContent = cfg.appName || ORIG.appName;
+    document.title = cfg.appName || ORIG.appName;
+    $('subText').textContent = cfg.subtitle || '';
+    window.CUSTOM_FIELDS = Array.isArray(cfg.customFields) ? cfg.customFields : [];
+  }
+
+  // Se ejecuta una vez, tras el login y antes de pintar la cartera
+  window.__beforeBoot = async () => {
+    const {data} = await window.__sb.from('app_settings').select('data').eq('id', 1).maybeSingle();
+    if(data && data.data) CURRENT = Object.assign({}, ORIG, data.data);
+    applySettings(CURRENT);
+  };
+
+  /* ----- campos personalizados dentro de la ficha ----- */
+  window.customFieldsHtml = (d, dis) => (window.CUSTOM_FIELDS || []).map(f => {
+    const v = (d.custom || {})[f.id];
+    const val = v == null ? '' : v;
+    const off = dis ? 'disabled' : '';
+    let input;
+    if(f.type === 'list') input = `<select data-cf="${esc(f.id)}" ${off}><option value="">—</option>${(f.options || []).map(o => `<option ${val === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    else input = `<input data-cf="${esc(f.id)}" type="${f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'}" value="${esc(val)}" ${off}>`;
+    return `<div class="field"><label>${esc(f.label)}</label>${input}</div>`;
+  }).join('');
+  window.bindCustomFields = (saveField) => {
+    document.querySelectorAll('#detailModal [data-cf]').forEach(el => {
+      const ev = (el.tagName === 'SELECT' || el.type === 'date') ? 'change' : 'blur';
+      let last = el.value;
+      el.addEventListener(ev, () => {
+        if(el.value === last) return;
+        last = el.value;
+        const doc = allDocs.find(x => x.id === openDocId);
+        if(!doc) return;
+        const custom = Object.assign({}, doc.custom || {});
+        const val = el.type === 'number' ? (el.value === '' ? null : Number(el.value)) : el.value;
+        if(val === null || val === '') delete custom[el.dataset.cf]; else custom[el.dataset.cf] = val;
+        saveField('custom', custom);
+      });
+    });
+  };
+
+  /* ----- pantalla de configuración ----- */
+  const countStage = id => allDocs.filter(d => d.stage === id).length;
+  const countProg = n => allDocs.filter(d => getProgramas(d).includes(n)).length;
+  const countClasif = n => allDocs.filter(d => d.clasificacion === n).length;
+  const hexOf = c => /^#[0-9a-f]{6}$/i.test(c) ? c : (resolvedColor(c).match(/^#[0-9a-f]{6}$/i) ? resolvedColor(c) : '#64748B');
+
+  function mkDraft(){
+    const c = CURRENT;
+    return {
+      appName: c.appName, subtitle: c.subtitle, calendlyUrl: c.calendlyUrl || '',
+      stages: arr(c.stages, ORIG.stages).map(s => ({id:s.id, label:s.label, hint:s.hint || '', color:s.color, isNew:false, deleted:false, moveTo:''})),
+      programas: (c.programas || []).map(n => ({orig:n, name:n, deleted:false})),
+      clasificaciones: (c.clasificaciones || []).map(n => ({orig:n, name:n, deleted:false})),
+      customFields: (c.customFields || []).map(f => ({id:f.id, label:f.label, type:f.type, options:(f.options || []).join(', '), isNew:false, deleted:false}))
+    };
+  }
+
+  function listRows(key, countFn, noun){
+    return draft[key].map((r, i) => r.deleted
+      ? `<div class="cfgrow gone"><span style="flex:1"><s>${esc(r.name)}</s> <span class="cfgnote">se quitará${r.orig && countFn(r.orig) ? ' de ' + countFn(r.orig) + ' cliente(s)' : ''}</span></span><button class="smallbtn" data-act="undo" data-k="${key}" data-i="${i}" type="button">Deshacer</button></div>`
+      : `<div class="cfgrow"><input type="text" data-k="${key}" data-i="${i}" data-f="name" value="${esc(r.name)}" placeholder="${noun}">${r.orig ? `<span class="cfgnote">${countFn(r.orig)} cliente(s)</span>` : ''}<button class="ib" data-act="del" data-k="${key}" data-i="${i}" title="Quitar" type="button">✕</button></div>`).join('');
+  }
+
+  function render(){
+    const D = draft, active = D.stages.filter(s => !s.deleted);
+    const stageRows = D.stages.map((s, i) => {
+      if(s.deleted){
+        const n = s.isNew ? 0 : countStage(s.id);
+        return `<div class="cfgrow gone"><span style="flex:1"><s>${esc(s.label)}</s> <span class="cfgnote">se eliminará</span>${n ? ` · mover sus ${n} cliente(s) a: <select data-k="stages" data-i="${i}" data-f="moveTo" style="max-width:200px">${active.map(a => `<option value="${esc(a.id)}" ${s.moveTo === a.id ? 'selected' : ''}>${esc(a.label || '(sin nombre)')}</option>`).join('')}</select>` : ''}</span><button class="smallbtn" data-act="undo" data-k="stages" data-i="${i}" type="button">Deshacer</button></div>`;
+      }
+      return `<div class="cfgrow"><input type="color" data-k="stages" data-i="${i}" data-f="color" value="${hexOf(s.color)}" title="Color"><input type="text" data-k="stages" data-i="${i}" data-f="label" value="${esc(s.label)}" placeholder="Nombre de la etapa"><input type="text" data-k="stages" data-i="${i}" data-f="hint" value="${esc(s.hint)}" placeholder="Descripción corta (opcional)"><button class="ib" data-act="up" data-k="stages" data-i="${i}" title="Subir" type="button">↑</button><button class="ib" data-act="down" data-k="stages" data-i="${i}" title="Bajar" type="button">↓</button><button class="ib" data-act="del" data-k="stages" data-i="${i}" title="Eliminar" type="button">✕</button></div>`;
+    }).join('');
+    const cfRows = D.customFields.map((f, i) => f.deleted
+      ? `<div class="cfgrow gone"><span style="flex:1"><s>${esc(f.label)}</s> <span class="cfgnote">se quitará de la ficha (los datos guardados no se borran)</span></span><button class="smallbtn" data-act="undo" data-k="customFields" data-i="${i}" type="button">Deshacer</button></div>`
+      : `<div class="cfgrow"><input type="text" data-k="customFields" data-i="${i}" data-f="label" value="${esc(f.label)}" placeholder="Nombre del campo"><select data-k="customFields" data-i="${i}" data-f="type" ${f.isNew ? '' : 'disabled'}>${[['text','Texto'],['number','Número'],['date','Fecha'],['list','Lista']].map(([v, l]) => `<option value="${v}" ${f.type === v ? 'selected' : ''}>${l}</option>`).join('')}</select>${f.type === 'list' ? `<input type="text" data-k="customFields" data-i="${i}" data-f="options" value="${esc(f.options)}" placeholder="Opciones separadas por coma">` : ''}<button class="ib" data-act="del" data-k="customFields" data-i="${i}" title="Quitar" type="button">✕</button></div>`).join('');
+
+    $('settingsModal').innerHTML = `
+      <button class="close" id="cfgClose" aria-label="Cerrar">×</button>
+      <h2>Configuración</h2>
+      <p class="cfgnote" style="margin:0 0 4px">Los cambios se aplican a todos los usuarios al pulsar "Guardar cambios".</p>
+
+      <div class="cfgsec"><h3>Textos y enlaces</h3></div>
+      <div class="fieldgrid" style="margin-bottom:0">
+        <div class="field"><label>Nombre de la app</label><input data-k="root" data-f="appName" value="${esc(D.appName)}"></div>
+        <div class="field"><label>Subtítulo</label><input data-k="root" data-f="subtitle" value="${esc(D.subtitle)}"></div>
+        <div class="field" style="grid-column:1/-1"><label>Enlace de Calendly</label><input data-k="root" data-f="calendlyUrl" value="${esc(D.calendlyUrl)}" placeholder="https://calendly.com/..."></div>
+      </div>
+
+      <div class="cfgsec"><h3>Etapas del pipeline</h3><button class="smallbtn" data-act="add" data-k="stages" type="button">+ Agregar etapa</button></div>
+      ${stageRows}
+
+      <div class="cfgsec"><h3>Programas</h3><button class="smallbtn" data-act="add" data-k="programas" type="button">+ Agregar</button></div>
+      ${listRows('programas', countProg, 'Nombre del programa')}
+
+      <div class="cfgsec"><h3>Clasificaciones</h3><button class="smallbtn" data-act="add" data-k="clasificaciones" type="button">+ Agregar</button></div>
+      ${listRows('clasificaciones', countClasif, 'Nombre de la clasificación')}
+
+      <div class="cfgsec"><h3>Campos personalizados</h3><button class="smallbtn" data-act="add" data-k="customFields" type="button">+ Agregar campo</button></div>
+      <p class="cfgnote" style="margin:0 0 8px">Aparecen en la ficha de cada cliente, junto a Etapa. El tipo no se puede cambiar después de guardar.</p>
+      ${cfRows || '<p class="cfgnote">Aún no hay campos personalizados.</p>'}
+
+      <div id="cfgMsg" class="cfgerr"></div>
+      <div class="modalactions">
+        <button class="ghostbtn" id="cfgCancel" type="button">Cancelar</button>
+        <button class="primarybtn" id="cfgSave" type="button">Guardar cambios</button>
+      </div>`;
+    $('cfgClose').addEventListener('click', closeCfg);
+    $('cfgCancel').addEventListener('click', closeCfg);
+    $('cfgSave').addEventListener('click', save);
+  }
+  const rerender = () => { const o = $('settingsOverlay'), y = o.scrollTop; render(); o.scrollTop = y; };
+  const closeCfg = () => { $('settingsOverlay').hidden = true; draft = null; };
+
+  $('settingsModal').addEventListener('input', e => {
+    const t = e.target, k = t.dataset.k, f = t.dataset.f;
+    if(!k || !f) return;
+    if(k === 'root') draft[f] = t.value; else draft[k][+t.dataset.i][f] = t.value;
+  });
+  $('settingsModal').addEventListener('change', e => {
+    const t = e.target;
+    if(t.dataset.f === 'type') rerender();
+  });
+  $('settingsModal').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]'); if(!b) return;
+    const k = b.dataset.k, i = +b.dataset.i, list = draft[k], act = b.dataset.act;
+    if(act === 'add'){
+      if(k === 'stages') list.push({id:rid('e_'), label:'', hint:'', color:'#3B82F6', isNew:true, deleted:false, moveTo:''});
+      else if(k === 'customFields') list.push({id:rid('cf_'), label:'', type:'text', options:'', isNew:true, deleted:false});
+      else list.push({orig:null, name:'', deleted:false});
+    }else if(act === 'del'){
+      const r = list[i];
+      if(r.isNew || (k !== 'stages' && !r.orig && !r.id)) list.splice(i, 1);
+      else {
+        r.deleted = true;
+        if(k === 'stages'){ const other = list.find((s, j) => j !== i && !s.deleted); r.moveTo = other ? other.id : ''; }
+      }
+    }else if(act === 'undo') list[i].deleted = false;
+    else if(act === 'up' && i > 0) [list[i-1], list[i]] = [list[i], list[i-1]];
+    else if(act === 'down' && i < list.length - 1) [list[i+1], list[i]] = [list[i], list[i+1]];
+    rerender();
+  });
+
+  async function save(){
+    const D = draft, msg = t => { $('cfgMsg').textContent = t; };
+    const dupe = names => { const s = new Set(); for(const n of names){ const k = n.trim().toLowerCase(); if(s.has(k)) return n; s.add(k); } return null; };
+    const aStages = D.stages.filter(s => !s.deleted);
+    if(!D.appName.trim()) return msg('Escribe el nombre de la app.');
+    if(D.calendlyUrl.trim() && !/^https?:\/\//i.test(D.calendlyUrl.trim())) return msg('El enlace de Calendly debe empezar con https://');
+    if(!aStages.length) return msg('Tiene que quedar al menos una etapa.');
+    if(aStages.some(s => !s.label.trim())) return msg('Todas las etapas necesitan nombre.');
+    let d = dupe(aStages.map(s => s.label)); if(d) return msg('Hay dos etapas con el nombre "' + d + '".');
+    for(const s of D.stages.filter(s => s.deleted && !s.isNew && countStage(s.id))){
+      if(!aStages.some(a => a.id === s.moveTo)) return msg('Elige a qué etapa mover los clientes de "' + s.label + '".');
+    }
+    for(const [key, noun] of [['programas', 'programas'], ['clasificaciones', 'clasificaciones']]){
+      const act = D[key].filter(r => !r.deleted);
+      if(act.some(r => !r.name.trim())) return msg('Hay ' + noun + ' sin nombre.');
+      d = dupe(act.map(r => r.name)); if(d) return msg('Hay ' + noun + ' repetidos: "' + d + '".');
+    }
+    const aCf = D.customFields.filter(f => !f.deleted);
+    if(aCf.some(f => !f.label.trim())) return msg('Todos los campos personalizados necesitan nombre.');
+    if(aCf.some(f => f.type === 'list' && !f.options.split(',').some(o => o.trim()))) return msg('Los campos tipo Lista necesitan al menos una opción.');
+
+    $('cfgSave').disabled = true; msg('Guardando…');
+    const sb = window.__sb;
+    try{
+      for(const s of D.stages.filter(s => s.deleted && !s.isNew)){
+        const {error} = await sb.from('clients').update({stage:s.moveTo}).eq('stage', s.id); if(error) throw error;
+      }
+      // Clasificaciones: dos pasos (por si dos nombres se cruzan)
+      const cl = D.clasificaciones.filter(c => c.orig && (c.deleted || c.name.trim() !== c.orig));
+      for(let i = 0; i < cl.length; i++){
+        const {error} = await sb.from('clients').update({clasificacion:'\u0001tmp' + i}).eq('clasificacion', cl[i].orig); if(error) throw error;
+      }
+      for(let i = 0; i < cl.length; i++){
+        const {error} = await sb.from('clients').update({clasificacion: cl[i].deleted ? null : cl[i].name.trim()}).eq('clasificacion', '\u0001tmp' + i); if(error) throw error;
+      }
+      // Programas (lista dentro de cada cliente)
+      const map = {};
+      D.programas.filter(p => p.orig).forEach(p => { if(p.deleted) map[p.orig] = null; else if(p.name.trim() !== p.orig) map[p.orig] = p.name.trim(); });
+      if(Object.keys(map).length){
+        for(let from = 0;; from += 1000){
+          const {data, error} = await sb.from('clients').select('id,programas').not('programas', 'is', null).range(from, from + 999); if(error) throw error;
+          for(const r of data){
+            const cur = Array.isArray(r.programas) ? r.programas : [];
+            if(!cur.some(x => has(map, x))) continue;
+            const next = [];
+            cur.forEach(x => { const m = has(map, x) ? map[x] : x; if(m !== null && !next.includes(m)) next.push(m); });
+            const {error: e2} = await sb.from('clients').update({programas:next}).eq('id', r.id); if(e2) throw e2;
+          }
+          if(data.length < 1000) break;
+        }
+      }
+      const next = {
+        appName: D.appName.trim(), subtitle: D.subtitle.trim(), calendlyUrl: D.calendlyUrl.trim(),
+        stages: aStages.map(s => ({id:s.id, label:s.label.trim(), hint:s.hint.trim(), color:s.color})),
+        programas: D.programas.filter(p => !p.deleted).map(p => p.name.trim()),
+        clasificaciones: D.clasificaciones.filter(c => !c.deleted).map(c => c.name.trim()),
+        customFields: aCf.map(f => ({id:f.id, label:f.label.trim(), type:f.type, options: f.type === 'list' ? f.options.split(',').map(o => o.trim()).filter(Boolean) : []}))
+      };
+      const {error} = await sb.from('app_settings').upsert({id:1, data:next, updated_at:new Date().toISOString()}); if(error) throw error;
+      CURRENT = next;
+      applySettings(next);
+      programFilter = programFilter.filter(p => PROGRAMAS.includes(p));
+      clasifFilter = clasifFilter.filter(c => CLASIF_FILTER_OPTIONS.includes(c));
+      if(activeStage !== 'all' && !STAGE_BY_ID[activeStage]) activeStage = 'all';
+      colVisible = {};
+      updateProgFilterBtn(); updateClasifFilterBtn();
+      window.__reloadClients();
+      renderAll();
+      closeCfg();
+    }catch(err){
+      $('cfgSave').disabled = false;
+      msg('No se pudo guardar: ' + (err && err.message ? err.message : 'error desconocido'));
+    }
+  }
+
+  $('settingsBtn').addEventListener('click', () => { draft = mkDraft(); render(); $('settingsOverlay').hidden = false; });
+  $('settingsOverlay').addEventListener('click', e => { if(e.target.id === 'settingsOverlay') closeCfg(); });
+  if(window.claude) claude.use('user').then(u => { if(u && u.can('data.write')) $('settingsBtn').style.display = ''; });
 })();
 </script>
 
