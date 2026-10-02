@@ -165,45 +165,121 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
 .ghostbtn{border:1px solid var(--border);background:transparent;color:var(--fg);border-radius:8px;padding:8px 16px;font-size:.85rem;cursor:pointer;font-family:var(--font-body)}
 </style>
 
-<div class="wrap">
-  <header class="top">
-    <div class="titlerow">
-      <div>
+<div class="app">
+  <aside class="side" id="side">
+    <div class="brand">
+      <img src="favicon.svg" alt="" width="34" height="34">
+      <div class="brandtxt">
         <h1 id="appName">Pipeline de Upsell</h1>
-        <p class="sub"><span id="subText">Cartera de Miguel Vélez · Abacus Exchange</span> · <a href="#" id="logoutLink" style="color:var(--fg-muted)">Salir</a></p>
-      </div>
-      <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
-        <button class="sortbtn" id="settingsBtn" style="display:none">Configuración</button>
-        <button class="sortbtn" id="importBtn" style="display:none">Importar CSV</button>
-        <button class="newbtn" id="newClientBtn">+ Nuevo cliente</button>
+        <p class="sub" id="subText">Cartera de Miguel Vélez · Abacus Exchange</p>
       </div>
     </div>
-    <div class="viewtoggle">
-      <button id="btnViewList" class="active">Lista</button>
-      <button id="btnViewKanban">Kanban</button>
+    <nav class="nav">
+      <div class="navlabel">Vistas</div>
+      <button class="navbtn active" id="btnViewList" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg><span>Lista</span></button>
+      <button class="navbtn" id="btnViewKanban" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="12" rx="1"/><rect x="17" y="3" width="4" height="8" rx="1"/></svg><span>Kanban</span></button>
+      <div class="navlabel">Acciones</div>
+      <button class="navbtn cta" id="newClientBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Nuevo cliente</span></button>
+      <button class="navbtn" id="importBtn" type="button" style="display:none"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></svg><span>Importar CSV</span></button>
+      <button class="navbtn" id="settingsBtn" type="button" style="display:none"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span>Configuración</span></button>
+    </nav>
+    <div class="sidefoot">
+      <div class="who"><span id="userEmail"></span><span id="userRole"></span></div>
+      <a href="#" id="logoutLink" class="navbtn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg><span>Cerrar sesión</span></a>
     </div>
-    <div class="pills" id="pills"></div>
-    <div class="toolbar">
-      <div class="search">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-        <input id="searchInput" type="text" placeholder="Buscar por nombre o correo…" autocomplete="off">
+  </aside>
+  <div class="scrim" id="scrim"></div>
+  <main class="main">
+    <header class="top">
+      <div class="toolbar">
+        <button class="menubtn" id="menuBtn" type="button" aria-label="Abrir menú"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input id="searchInput" type="text" placeholder="Buscar por nombre o correo…" autocomplete="off">
+        </div>
+        <div class="progfilter" id="progFilterWrap">
+          <button class="sortbtn" id="progFilterBtn">Programas</button>
+          <div class="progpanel" id="progPanel" hidden></div>
+        </div>
+        <div class="progfilter" id="clasifFilterWrap">
+          <button class="sortbtn" id="clasifFilterBtn">Clasificación</button>
+          <div class="progpanel" id="clasifPanel" hidden></div>
+        </div>
+        <button class="sortbtn" id="sortBtn" title="Cambiar orden">Importe ↓</button>
+        <span class="count" id="countLabel"></span>
       </div>
-      <div class="progfilter" id="progFilterWrap">
-        <button class="sortbtn" id="progFilterBtn">Programas</button>
-        <div class="progpanel" id="progPanel" hidden></div>
-      </div>
-      <div class="progfilter" id="clasifFilterWrap">
-        <button class="sortbtn" id="clasifFilterBtn">Clasificación</button>
-        <div class="progpanel" id="clasifPanel" hidden></div>
-      </div>
-      <button class="sortbtn" id="sortBtn" title="Cambiar orden">Importe ↓</button>
+      <div class="pills" id="pills"></div>
+      <div id="roBanner"></div>
+    </header>
+    <div class="content">
+      <div id="listView"><div class="empty">Cargando tu cartera…</div></div>
+      <div id="kanbanView"><div class="board" id="board"></div></div>
     </div>
-    <div id="roBanner"></div>
-  </header>
-  <div class="count" id="countLabel"></div>
-  <div id="listView"><div class="empty">Cargando tu cartera…</div></div>
-  <div id="kanbanView"><div class="board" id="board"></div></div>
+  </main>
 </div>
+
+<style>
+/* ---------- Rediseño: barra lateral + contenido a pantalla completa ---------- */
+html,body{height:100%}
+body{padding-inline:0;overflow:hidden}
+.app{display:grid;grid-template-columns:252px minmax(0,1fr);height:100vh;height:100dvh}
+.side{background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:16px 12px;overflow-y:auto}
+.brand{display:flex;gap:10px;align-items:center;padding:4px 8px 16px;border-bottom:1px solid var(--border);margin-bottom:6px}
+.brand img{border-radius:9px;flex:none}
+.brandtxt{min-width:0}
+.brand h1{font-size:1.02rem;margin:0;line-height:1.2}
+.brand .sub{margin:2px 0 0;font-size:.74rem;line-height:1.3}
+.navlabel{font-size:.68rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-muted);padding:14px 10px 4px}
+.navbtn{display:flex;align-items:center;gap:10px;width:100%;border:none;background:transparent;color:var(--fg);padding:9px 10px;border-radius:9px;font-family:var(--font-body);font-size:.88rem;font-weight:500;cursor:pointer;text-align:left;text-decoration:none}
+.navbtn svg{width:17px;height:17px;flex:none;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.navbtn:hover{background:color-mix(in srgb,var(--accent) 9%,transparent)}
+.navbtn.active{background:color-mix(in srgb,var(--accent) 16%,var(--surface));color:var(--accent);font-weight:600}
+.navbtn.cta{background:var(--accent);color:var(--accent-fg);font-weight:600;margin:2px 0 4px}
+.navbtn.cta:hover{background:var(--accent);opacity:.92}
+.sidefoot{margin-top:auto;border-top:1px solid var(--border);padding-top:10px}
+.who{padding:2px 10px 8px;font-size:.75rem;color:var(--fg-muted);display:flex;flex-direction:column;gap:2px;overflow:hidden}
+.who span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.main{display:flex;flex-direction:column;min-width:0;height:100vh;height:100dvh}
+header.top{position:relative;z-index:5;background:var(--bg);padding:16px 22px 12px;border-bottom:1px solid var(--border);flex:none}
+.toolbar{margin-bottom:10px}
+.count{white-space:nowrap;padding:0 4px;margin-left:auto}
+.pills{flex-wrap:nowrap;overflow-x:auto;margin-bottom:0;padding-bottom:4px;scrollbar-width:thin}
+.pill{flex:none}
+#roBanner:empty{display:none}
+.menubtn,.scrim{display:none}
+.menubtn{border:1px solid var(--border);background:var(--surface);color:var(--fg);border-radius:10px;width:38px;height:38px;align-items:center;justify-content:center;cursor:pointer;flex:none}
+.menubtn svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+.content{flex:1;min-height:0;overflow:auto;padding:18px 22px}
+#listView{padding:0 0 24px;flex-direction:row;flex-wrap:wrap;gap:10px;align-content:flex-start}
+#listView .card{flex:1 1 340px;max-width:560px}
+#listView .empty{flex:1 0 100%}
+#listView .loadmore{flex:0 0 100%;max-width:360px;margin:10px auto 0}
+#kanbanView{height:100%;padding:0}
+.board{height:100%;gap:12px;align-items:stretch;padding-bottom:6px}
+.col{flex:1 0 250px;max-width:380px;max-height:none;height:auto}
+.col-cards{flex:1;min-height:0}
+@media (max-width:900px){
+  .app{grid-template-columns:1fr}
+  .side{position:fixed;top:0;bottom:0;left:0;width:272px;z-index:40;transform:translateX(-100%);transition:transform .2s ease;box-shadow:0 0 40px rgba(0,0,0,.35)}
+  body.menu-open .side{transform:none}
+  body.menu-open .scrim{display:block;position:fixed;inset:0;background:var(--overlay);z-index:35}
+  .menubtn{display:inline-flex}
+  header.top{padding:12px 14px 8px}
+  .content{padding:14px}
+  .toolbar{flex-wrap:wrap}
+  .toolbar .search{flex:1 1 150px}
+  .count{margin-left:0}
+  .col{flex-basis:78vw}
+}
+</style>
+<script>
+(function(){
+  const b = document.body;
+  document.getElementById('menuBtn').addEventListener('click', () => b.classList.toggle('menu-open'));
+  document.getElementById('scrim').addEventListener('click', () => b.classList.remove('menu-open'));
+  document.getElementById('side').addEventListener('click', e => { if(e.target.closest('.navbtn')) b.classList.remove('menu-open'); });
+})();
+</script>
 
 <div class="overlay" id="detailOverlay" hidden>
   <div class="modal" id="detailModal"></div>
@@ -274,6 +350,9 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
       return;
     }
     entered = true;
+    const em = document.getElementById('userEmail'), rl = document.getElementById('userRole');
+    if(em) em.textContent = (session.user && session.user.email) || '';
+    if(rl) rl.textContent = role === 'editor' ? 'Editor' : 'Solo lectura';
     $('authOverlay').hidden = true;
     readyResolve();
   }
