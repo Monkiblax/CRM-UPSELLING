@@ -1,5 +1,5 @@
 <!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
-<title>Pipeline de Upsell (Copy)</title>
+<title>Pipeline de Upsell</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Work+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
@@ -171,7 +171,7 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
     <div class="titlerow">
       <div>
         <h1>Pipeline de Upsell</h1>
-        <p class="sub">Cartera de Miguel Vélez · Abacus Exchange</p>
+        <p class="sub"><span id="subText">Cartera de Miguel Vélez · Abacus Exchange</span> · <a href="#" id="logoutLink" style="color:var(--fg-muted)">Salir</a></p>
       </div>
       <button class="newbtn" id="newClientBtn">+ Nuevo cliente</button>
     </div>
@@ -209,6 +209,149 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
   <div class="modal small" id="newModal"></div>
 </div>
 
+<div class="overlay" id="authOverlay" style="background:var(--bg);align-items:center">
+  <div class="modal small">
+    <h2>Pipeline de Upsell</h2>
+    <p class="sub" id="authMsg" style="margin:0 0 14px">Inicia sesión para ver la cartera.</p>
+    <div class="fieldgrid" style="grid-template-columns:1fr">
+      <div class="field"><label>Correo</label><input id="authEmail" type="email" autocomplete="username"></div>
+      <div class="field"><label>Contraseña</label><input id="authPass" type="password" autocomplete="current-password"></div>
+    </div>
+    <div class="modalactions" style="justify-content:space-between">
+      <button class="ghostbtn" id="authSignUp" type="button">Crear cuenta</button>
+      <button class="primarybtn" id="authSignIn" type="button">Entrar</button>
+    </div>
+    <div id="authNotice" class="ophint" style="margin-top:12px"></div>
+    <div id="authOut" class="ophint" hidden><a href="#" id="authOutLink" style="color:var(--accent)">Cerrar sesión</a></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<script>
+/* ---------- Capa de datos: Supabase (reemplaza la base de datos del artifact) ---------- */
+(function(){
+  const cfg = window.APP_CONFIG || {};
+  const $ = id => document.getElementById(id);
+  if(cfg.SUBTITLE) $('subText').textContent = cfg.SUBTITLE;
+  const notice = t => { $('authNotice').textContent = t || ''; };
+  if(!window.supabase || !cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY){
+    notice('Falta configurar Supabase (revisa config.js).');
+    return;
+  }
+  const sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+
+  const MAP = {fechaCierre:'fecha_cierre', contactoDesde:'contacto_desde', montoPagado:'monto_pagado', tipoPago:'tipo_pago', fechaPago:'fecha_pago', order:'ord'};
+  const REV = Object.fromEntries(Object.entries(MAP).map(([k,v])=>[v,k]));
+  const toRow = obj => { const r = {}; for(const [k,v] of Object.entries(obj)){ if(v !== undefined) r[MAP[k]||k] = v; } return r; };
+  const toFields = row => { const d = {}; for(const [k,v] of Object.entries(row)){ if(k==='id'||k==='created_at'||v===null) continue; d[REV[k]||k] = v; } return d; };
+
+  let role = null, entered = false, lastWrite = 0;
+  let readyResolve; const ready = new Promise(r => { readyResolve = r; });
+
+  function showAuth(msg, locked){
+    $('authOverlay').hidden = false;
+    if(msg !== undefined) notice(msg);
+    $('authOut').hidden = !locked;
+  }
+  async function enter(session){
+    if(entered) return;
+    if(!session){ showAuth('', false); return; }
+    const {data, error} = await sb.rpc('app_role');
+    role = error ? null : data;
+    if(!role){
+      showAuth('Tu correo no está autorizado todavía o aún no lo confirmaste. Pídele al administrador que te agregue y confirma el correo que te llegó.', true);
+      return;
+    }
+    entered = true;
+    $('authOverlay').hidden = true;
+    readyResolve();
+  }
+
+  async function signIn(){
+    notice('Entrando…');
+    const {error} = await sb.auth.signInWithPassword({email: $('authEmail').value.trim(), password: $('authPass').value});
+    if(error){
+      notice(/confirm/i.test(error.message) ? 'Confirma tu correo primero (revisa tu bandeja de entrada).' : 'Correo o contraseña incorrectos.');
+      return;
+    }
+    const {data} = await sb.auth.getSession();
+    enter(data.session);
+  }
+  async function signUp(){
+    const email = $('authEmail').value.trim(), password = $('authPass').value;
+    if(!email || password.length < 6){ notice('Escribe tu correo y una contraseña de al menos 6 caracteres.'); return; }
+    notice('Creando cuenta…');
+    const {error} = await sb.auth.signUp({email, password, options:{emailRedirectTo: location.origin}});
+    notice(error ? error.message : 'Te enviamos un correo para confirmar. Ábrelo, confirma y vuelve aquí para entrar.');
+  }
+  $('authSignIn').addEventListener('click', signIn);
+  $('authSignUp').addEventListener('click', signUp);
+  ['authEmail','authPass'].forEach(id => $(id).addEventListener('keydown', e => { if(e.key==='Enter') signIn(); }));
+  const logout = async e => { if(e) e.preventDefault(); await sb.auth.signOut(); location.reload(); };
+  $('logoutLink').addEventListener('click', logout);
+  $('authOutLink').addEventListener('click', logout);
+  sb.auth.getSession().then(({data}) => enter(data.session));
+
+  function makeCollection(name){
+    return {
+      onSnapshot(cb, errCb){
+        let stopped = false, timer = null;
+        async function load(){
+          try{
+            let all = [], from = 0;
+            const step = 1000;
+            for(;;){
+              const {data, error} = await sb.from(name).select('*').order('ord', {ascending:true, nullsFirst:false}).order('id').range(from, from + step - 1);
+              if(error) throw error;
+              all = all.concat(data);
+              if(data.length < step) break;
+              from += step;
+            }
+            if(!stopped) cb({docs: all.map(r => ({id: r.id, data: () => toFields(r)}))});
+          }catch(e){ if(errCb) errCb(e); }
+        }
+        load();
+        const ch = sb.channel('rt-' + name).on('postgres_changes', {event:'*', schema:'public', table:name}, () => {
+          if(Date.now() - lastWrite < 1500) return;
+          clearTimeout(timer); timer = setTimeout(load, 400);
+        }).subscribe();
+        return () => { stopped = true; sb.removeChannel(ch); };
+      },
+      async add(data){
+        lastWrite = Date.now();
+        const {data: row, error} = await sb.from(name).insert(toRow(data)).select('id').single();
+        if(error) throw error;
+        return {id: row.id};
+      },
+      doc(id){
+        return {
+          async update(obj){
+            lastWrite = Date.now();
+            const {error} = await sb.from(name).update(toRow(obj)).eq('id', id);
+            if(error) throw error;
+          },
+          async delete(){
+            lastWrite = Date.now();
+            const {error} = await sb.from(name).delete().eq('id', id);
+            if(error) throw error;
+          }
+        };
+      }
+    };
+  }
+  const db = { collection: makeCollection };
+  window.claude = {
+    use: async (name) => {
+      await ready;
+      if(name === 'db') return db;
+      if(name === 'user') return { can: () => role === 'editor' };
+      return null;
+    }
+  };
+})();
+</script>
+
 <script>
 const STAGES = [
   {id:'lead', label:'Lead', hint:'Aún sin contactar', color:'var(--stage-lead)'},
@@ -223,7 +366,7 @@ const STAGES = [
 ];
 const STAGE_BY_ID = Object.fromEntries(STAGES.map(s=>[s.id,s]));
 const ESTADOS_OP = ['En proceso','Pendiente','Pagado','Cancelado'];
-const CALENDLY_URL = 'https://calendly.com/miguel-abacus/sesion-de-dudas-e-inquietudes';
+const CALENDLY_URL = (window.APP_CONFIG && window.APP_CONFIG.CALENDLY_URL) || 'https://calendly.com/miguel-abacus/sesion-de-dudas-e-inquietudes';
 const PROGRAMAS = ['Abacus Experience','PRO','Bundle','Bundle premium','Portfolio Hacking','Options Pocket','PMC','CPA New York','CPA Miami','Traders Club','Dynamic','Inner Circle','1 a 1'];
 const CLASIFICACIONES = ['Cursando / Invierte','Cursando / No Invierte','Finalizado / Invierte','Finalizado / No Invierte','Finalizado / Inactivo','No Completó','Pausado','Abandonó'];
 const SIN_CLASIFICAR = 'Sin clasificar';
