@@ -173,6 +173,7 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
         <h1 id="appName">Pipeline de Upsell</h1>
         <p class="sub" id="subText">Cartera de Miguel Vélez · Abacus Exchange</p>
       </div>
+      <button class="collapse" id="sideCollapse" type="button" aria-label="Ocultar menú" title="Ocultar menú"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
     </div>
     <nav class="nav">
       <div class="navlabel">Vistas</div>
@@ -246,9 +247,15 @@ header.top{position:relative;z-index:5;background:var(--bg);padding:16px 22px 12
 .pills{flex-wrap:wrap;gap:6px;margin-bottom:0}
 .pill{flex:none;padding:5px 11px;font-size:.8rem}
 #roBanner:empty{display:none}
-.menubtn,.scrim{display:none}
-.menubtn{border:1px solid var(--border);background:var(--surface);color:var(--fg);border-radius:10px;width:38px;height:38px;align-items:center;justify-content:center;cursor:pointer;flex:none}
-.menubtn svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+.scrim{display:none}
+.menubtn{display:inline-flex;border:1px solid var(--border);background:var(--surface);color:var(--fg);border-radius:10px;width:38px;height:38px;align-items:center;justify-content:center;cursor:pointer;flex:none}
+.menubtn:hover,.collapse:hover{border-color:var(--accent)}
+.menubtn svg,.collapse svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.collapse{margin-left:auto;flex:none;width:30px;height:30px;border:1px solid var(--border);background:transparent;color:var(--fg-muted);border-radius:8px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+body.side-collapsed .app{grid-template-columns:minmax(0,1fr)}
+body.side-collapsed .side{display:none}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(20px);background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:999px;font-size:.84rem;font-weight:500;box-shadow:0 8px 28px rgba(0,0,0,.3);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:80}
+.toast.show{opacity:1;transform:translateX(-50%)}
 .content{flex:1;min-height:0;overflow:auto;padding:18px 22px}
 #listView{padding:0 0 24px;flex-direction:row;flex-wrap:wrap;gap:10px;align-content:flex-start}
 #listView .card{flex:1 1 340px;max-width:560px}
@@ -263,7 +270,7 @@ header.top{position:relative;z-index:5;background:var(--bg);padding:16px 22px 12
   .side{position:fixed;top:0;bottom:0;left:0;width:272px;z-index:40;transform:translateX(-100%);transition:transform .2s ease;box-shadow:0 0 40px rgba(0,0,0,.35)}
   body.menu-open .side{transform:none}
   body.menu-open .scrim{display:block;position:fixed;inset:0;background:var(--overlay);z-index:35}
-  .menubtn{display:inline-flex}
+  .collapse{display:none}
   header.top{padding:12px 14px 8px}
   .content{padding:14px}
   .toolbar{flex-wrap:wrap}
@@ -274,8 +281,20 @@ header.top{position:relative;z-index:5;background:var(--bg);padding:16px 22px 12
 </style>
 <script>
 (function(){
-  const b = document.body;
-  document.getElementById('menuBtn').addEventListener('click', () => b.classList.toggle('menu-open'));
+  const b = document.body, mq = window.matchMedia('(max-width:900px)');
+  const KEY = 'crmSideCollapsed';
+  try{ if(!mq.matches && localStorage.getItem(KEY) === '1') b.classList.add('side-collapsed'); }catch(e){}
+  const toggleSide = () => {
+    if(mq.matches){ b.classList.toggle('menu-open'); return; }
+    const c = b.classList.toggle('side-collapsed');
+    try{ localStorage.setItem(KEY, c ? '1' : '0'); }catch(e){}
+  };
+  document.getElementById('menuBtn').addEventListener('click', toggleSide);
+  document.getElementById('sideCollapse').addEventListener('click', toggleSide);
+  // aviso breve (lo usa el cambio de etapa desde la ficha)
+  const t = document.createElement('div'); t.className = 'toast'; t.id = 'toast'; document.body.appendChild(t);
+  let tt = null;
+  window.showToast = msg => { t.textContent = msg; t.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => t.classList.remove('show'), 2200); };
   document.getElementById('scrim').addEventListener('click', () => b.classList.remove('menu-open'));
   document.getElementById('side').addEventListener('click', e => { if(e.target.closest('.navbtn')) b.classList.remove('menu-open'); });
 })();
@@ -466,7 +485,8 @@ const STAGES = [
   {id:'pitch', label:'Negociación', hint:'Ya se le presentó', color:'var(--stage-pitch)'},
   {id:'invoice', label:'Invoice', hint:'Factura abierta', color:'var(--stage-invoice)'},
   {id:'pagado', label:'Pagado', hint:'Pago recibido', color:'var(--stage-pagado)'},
-  {id:'suscripcion', label:'Suscripción', hint:'Cliente en suscripción activa', color:'var(--stage-suscripcion)'}
+  {id:'suscripcion', label:'Suscripción', hint:'Cliente en suscripción activa', color:'var(--stage-suscripcion)'},
+  {id:'lost', label:'LOST', hint:'Oportunidad perdida', color:'#E5484D'}
 ];
 const STAGE_BY_ID = Object.fromEntries(STAGES.map(s=>[s.id,s]));
 const ESTADOS_OP = ['En proceso','Pendiente','Pagado','Cancelado'];
@@ -819,7 +839,10 @@ function renderDetailModal(){
   });
   document.getElementById('fClasif').addEventListener('change', e=> saveField('clasificacion', e.target.value));
   document.getElementById('fStage').addEventListener('change', async e=>{
-    await moveStage(openDocId, e.target.value);
+    const target = e.target.value, st = STAGE_BY_ID[target];
+    const p = moveStage(openDocId, target);   // mueve la tarjeta a su columna al instante
+    if(window.showToast && st) window.showToast('Movido a ' + st.label.replace(/&amp;/g,'&'));
+    await p;
     renderDetailModal();
   });
   document.getElementById('fMontoPagado').addEventListener('blur', e=> saveField('montoPagado', Number(e.target.value)||0));
