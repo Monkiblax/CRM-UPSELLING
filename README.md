@@ -33,3 +33,7 @@ En Supabase → Table Editor → `clients` → **Import data from CSV**, o con S
 - La clave `anon` es pública por diseño; el acceso real lo controlan el login y las políticas RLS.
 - Acceso: solo correos en `allowed_emails` con email confirmado pueden leer; solo `editor` puede escribir.
 - Cambios en vivo entre usuarios vía Supabase Realtime.
+
+## Pruebas
+
+`node tests/import.test.js` corre las pruebas automáticas del importador de CSV (formatos de archivo, importes, duplicados, programas, codificaciones y que importar dos veces no duplique). Correrlas después de tocar el importador.
