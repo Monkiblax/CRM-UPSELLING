@@ -182,6 +182,7 @@ h1{font-family:var(--font-display);font-weight:800;font-size:1.5rem;margin:0 0 2
       <div class="navlabel">Acciones</div>
       <button class="navbtn cta" id="newClientBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Nuevo cliente</span></button>
       <button class="navbtn" id="importBtn" type="button" style="display:none"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></svg><span>Importar CSV</span></button>
+      <button class="navbtn" id="exportBtn" type="button" style="display:none"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12M7 11l5 5 5-5M4 20h16"/></svg><span>Exportar respaldo</span></button>
       <button class="navbtn" id="settingsBtn" type="button" style="display:none"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span>Configuración</span></button>
     </nav>
     <div class="sidefoot">
@@ -326,6 +327,9 @@ body.side-collapsed .side{display:none}
 <div class="overlay" id="settingsOverlay" hidden>
   <div class="modal" id="settingsModal" style="max-width:780px"></div>
 </div>
+<div class="overlay" id="exportOverlay" hidden>
+  <div class="modal small" id="exportModal"></div>
+</div>
 <div class="overlay" id="importOverlay" hidden>
   <div class="modal small" id="importModal"></div>
 </div>
@@ -347,7 +351,7 @@ body.side-collapsed .side{display:none}
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="vendor/supabase-js-2.117.2.js"></script>
 <script src="config.js"></script>
 <script>
 /* ---------- Capa de datos: Supabase (reemplaza la base de datos del artifact) ---------- */
@@ -1324,7 +1328,7 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
       });
       let importe = 0;
       if(hasImporte){
-        const m = parseMoney(get('importe')); importe = m.v;
+        const m = parseMoney(get('importe')); importe = m.st === 'negative' ? 0 : m.v;   // los importes negativos no existen: quedan en 0 y se avisa
         if(m.st === 'bad') w.badMoney++; else if(m.st === 'ambiguous') w.ambiguousMoney++; else if(m.st === 'negative') w.negativeMoney++;
       }
 
@@ -1382,7 +1386,7 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
     if(res.unknownProgs.length) notes.push('Programas que no existen en tu lista y se ignoran: ' + res.unknownProgs.map(escapeHtml).join(', ') + '. Puedes crearlos en Configuración y volver a importar.');
     if(w.badMoney) notes.push(plural(w.badMoney, 'importe no es un número y quedó en', 'importes no son números y quedaron en') + ' $0.');
     if(w.ambiguousMoney) notes.push(plural(w.ambiguousMoney, 'importe tiene un separador dudoso', 'importes tienen un separador dudoso') + ' (por ejemplo 1.500 o 1,500; se leyó como mil quinientos). Revísalos.');
-    if(w.negativeMoney) notes.push(plural(w.negativeMoney, 'importe es negativo', 'importes son negativos') + '. Revísalo.');
+    if(w.negativeMoney) notes.push(plural(w.negativeMoney, 'importe es negativo y quedó', 'importes son negativos y quedaron') + ' en $0. Revísalo.');
     if(w.sciPhones) notes.push(plural(w.sciPhones, 'teléfono viene en notación científica', 'teléfonos vienen en notación científica') + ' (ej. 1.8E+10): Excel dañó el número. Revisa el archivo.');
     const sample = res.toAdd.slice(0, 5).map(r => `<div class="cfgnote" style="margin:2px 0">• ${escapeHtml(r.nombre)}${r.correo ? ' · ' + escapeHtml(r.correo) : ''}${r.importe ? ' · $' + r.importe : ''}${r.programas.length ? ' · ' + r.programas.map(escapeHtml).join(' + ') : ''}</div>`).join('');
     render(`<h2>Importar clientes</h2>
@@ -1693,6 +1697,77 @@ if(window.claude && window.claude.hot && window.claude.hot.ready){
   $('settingsBtn').addEventListener('click', () => { draft = mkDraft(); render(); $('settingsOverlay').hidden = false; });
   $('settingsOverlay').addEventListener('click', e => { if(e.target.id === 'settingsOverlay') closeCfg(); });
   if(window.claude) claude.use('user').then(u => { if(u && u.can('data.write')) $('settingsBtn').style.display = ''; });
+})();
+</script>
+
+<script>
+/* ---------- Exportar respaldo (el plan gratis de Supabase no trae respaldos automáticos) ---------- */
+(function(){
+  const $ = id => document.getElementById(id);
+  const stamp = () => new Date().toISOString().slice(0, 10);
+
+  async function fetchAll(table, orderCols){
+    const sb = window.__sb, out = []; let from = 0;
+    for(;;){
+      let q = sb.from(table).select('*');
+      orderCols.forEach(c => { q = q.order(c); });
+      const {data, error} = await q.range(from, from + 999);
+      if(error) throw error;
+      out.push(...data);
+      if(data.length < 1000) break;
+      from += 1000;
+    }
+    return out;
+  }
+  function download(name, text, mime){
+    const blob = new Blob([text], {type: mime + ';charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  const csvCell = v => { const s = v == null ? '' : String(v); return /[",\n\r;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  function clientsCsv(){
+    const labelOf = id => { const st = STAGE_BY_ID[id]; return st ? String(st.label).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'") : id; };
+    const head = ['Stage', 'Nombre', 'Correo Electronico', 'Numero de Telefono', 'Importe', 'Fecha de Cierre', 'Programa', 'Clasificacion', 'Notas'];
+    const rows = allDocs.map(d => [labelOf(d.stage), d.nombre, d.correo, d.telefono, d.importe, d.fechaCierre, getProgramas(d).join('; '), d.clasificacion, d.notas]);
+    return '\uFEFF' + [head].concat(rows).map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+  }
+
+  const close = () => { $('exportOverlay').hidden = true; };
+  function render(){
+    $('exportModal').innerHTML = `<button class="close" id="expClose" aria-label="Cerrar">×</button>
+      <h2>Exportar respaldo</h2>
+      <p class="ophint" style="margin:0 0 12px">Guarda una copia de tus datos fuera de Supabase. Hazlo de vez en cuando y antes de cambios grandes. Los archivos contienen datos de clientes: guárdalos en un lugar privado y no los subas a GitHub.</p>
+      <div class="modalactions" style="flex-direction:column;align-items:stretch;gap:10px;margin-top:6px">
+        <button class="primarybtn" id="expJson" type="button">Respaldo completo (JSON)</button>
+        <button class="ghostbtn" id="expCsv" type="button">Clientes para Excel / Sheets (CSV)</button>
+      </div>
+      <div id="expMsg" class="ophint" style="margin-top:10px"></div>`;
+    $('expClose').addEventListener('click', close);
+    $('expCsv').addEventListener('click', () => {
+      download('crm-clientes-' + stamp() + '.csv', clientsCsv(), 'text/csv');
+      $('expMsg').textContent = 'Listo: ' + allDocs.length + ' clientes exportados.';
+    });
+    $('expJson').addEventListener('click', async () => {
+      $('expJson').disabled = true; $('expMsg').textContent = 'Preparando respaldo…';
+      try{
+        const tables = {};
+        tables.clients = await fetchAll('clients', ['ord', 'id']);
+        tables.app_settings = await fetchAll('app_settings', ['id']);
+        const payload = {exportado_el: new Date().toISOString(), app: document.title, version_formato: 1, filas: {clients: tables.clients.length, app_settings: tables.app_settings.length}, tablas: tables};
+        download('crm-respaldo-' + stamp() + '.json', JSON.stringify(payload, null, 1), 'application/json');
+        $('expMsg').textContent = 'Listo: respaldo con ' + tables.clients.length + ' clientes y la configuración.';
+      }catch(err){
+        $('expMsg').textContent = 'No se pudo exportar: ' + (err && err.message ? err.message : 'error desconocido');
+      }
+      $('expJson').disabled = false;
+    });
+  }
+  $('exportBtn').addEventListener('click', () => { render(); $('exportOverlay').hidden = false; });
+  $('exportOverlay').addEventListener('click', e => { if(e.target.id === 'exportOverlay') close(); });
+  if(window.claude) claude.use('user').then(u => { if(u && u.can('data.write')) $('exportBtn').style.display = ''; });
+  window.ExportLogic = {clientsCsv, csvCell};
 })();
 </script>
 

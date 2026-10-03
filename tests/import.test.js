@@ -126,6 +126,7 @@ const names = r => r.toAdd.map(x => x.nombre);
   t('9750', 9750, 'ok'); t('20000', 20000, 'ok'); t('1e3', 1000, 'ambiguous'); t('2.5E+3', 2500, 'ambiguous');
   const r = L.plan('Nombre,Importe\nA,"$1,500"\nB,abc\nC,(50)\nD,1.250', []);
   eq('T10 avisos', [r.warnings.ambiguousMoney, r.warnings.badMoney, r.warnings.negativeMoney], [2, 1, 1]);
+  eq('T10 negativo se guarda como 0', L.plan('Nombre,Importe\nA,-50\nB,(20)', []).toAdd.map(x => x.importe), [0, 0]);
 }
 /* ============ 11. Duplicados contra la base ============ */
 {
